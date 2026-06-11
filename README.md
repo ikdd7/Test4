@@ -9,7 +9,7 @@
 ## 0. 한눈에 보기
 
 - **프론트(브라우저 채팅) + 서버(API 라우트)** 구조. **API 키는 서버에서만** 사용 — 프론트에 절대 노출되지 않습니다.
-- 답변 생성: **Anthropic Claude API**(`claude-opus-4-8`, 정확성 우선).
+- 답변 생성: **Anthropic Claude API**(`claude-fable-5` — Anthropic 최상위 모델, 정확성 최우선. 입력 $10/출력 $50 per 1M tokens. 비용을 낮추려면 env에서 `claude-opus-4-8` 등으로 교체 가능).
 - 의미검색 임베딩: **무료 오픈소스 한국어(다국어) 모델 `Xenova/multilingual-e5-small`** (Transformers.js, 로컬 실행) → **당신이 발급할 키는 Claude 키 하나뿐**.
 - 검색: **하이브리드(키워드 + 벡터)**, 법률·시행령·규칙·별표·고시·질의회신을 **계층 가로질러** 검색.
 - 답변: **효력 위계 구분**(①법령 근거 / ②해석·참고) + **4중 환각 억제** + **건물 조건 판정 규칙** + **근거 표기**.
@@ -88,7 +88,7 @@
    | `ANTHROPIC_API_KEY` | https://console.anthropic.com → API Keys → Create Key | **유일한 발급 키** |
    | `APP_PASSWORD` | 직접 정함 | 접속 비밀번호 |
    | `AUTH_SALT` | 아무 랜덤 문자열 | 쿠키 서명용(권장) |
-   | `ANTHROPIC_MODEL` | (선택) | 기본 `claude-opus-4-8` |
+   | `ANTHROPIC_MODEL` | (선택) | 기본 `claude-fable-5` (비용 절감 시 `claude-opus-4-8` 등) |
 4. **인제스트(색인 생성)** — `./data` 에 파일을 넣은 뒤:
    ```bash
    npm run ingest
@@ -115,7 +115,7 @@
    - `ANTHROPIC_API_KEY` = (당신의 Claude 키)
    - `APP_PASSWORD` = (접속 비밀번호)
    - `AUTH_SALT` = (아무 랜덤 문자열)
-   - (선택) `ANTHROPIC_MODEL` = `claude-opus-4-8`
+   - (선택) `ANTHROPIC_MODEL` = `claude-fable-5`
 5. **Deploy** 클릭 → 빌드 완료까지 대기.
 6. 발급된 주소(`https://…vercel.app`) 접속 → 비밀번호 입력 → 사용.
 7. 이후 데이터 갱신: 로컬에서 `npm run ingest` → `git commit` → `git push` 하면 자동 재배포됩니다.

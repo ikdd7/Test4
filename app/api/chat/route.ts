@@ -5,9 +5,12 @@ import { SYSTEM_PROMPT } from "@/lib/prompt";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+// Fable 5는 적응형 사고가 항상 켜져 있어 어려운 질문에서 응답이 길어질 수 있음 → 타임아웃 여유.
+// (Vercel이 플랜 한도에 맞게 자동으로 상한 적용)
+export const maxDuration = 300;
 
-const MODEL = process.env.ANTHROPIC_MODEL || "claude-opus-4-8";
+// Claude Fable 5: thinking 항상 켜짐(파라미터 생략), prefill/temperature 미지원 — 본 코드는 모두 미사용.
+const MODEL = process.env.ANTHROPIC_MODEL || "claude-fable-5";
 
 type Msg = { role: "user" | "assistant"; content: string };
 
