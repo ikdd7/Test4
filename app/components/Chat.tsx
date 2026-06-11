@@ -91,7 +91,13 @@ export default function Chat() {
 
         {busy && (
           <div className="msg assistant">
-            <div className="bubble">검색하고 근거를 확인하는 중…</div>
+            <div className="bubble">
+              여러 단계로 검색하고 근거를 교차검증하는 중…
+              <br />
+              <span style={{ fontSize: 12, color: "#888" }}>
+                (정확도를 위해 다단계로 처리합니다 · 최대 1~2분 걸릴 수 있어요)
+              </span>
+            </div>
           </div>
         )}
       </div>
