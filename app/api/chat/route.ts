@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
-import { search, formatContext, indexSize } from "@/lib/search";
+import { search, lookupExact, formatContext, indexSize } from "@/lib/search";
 import { SYSTEM_PROMPT, AGENT_INSTRUCTION, VERIFY_PROMPT } from "@/lib/prompt";
 import type { Hit } from "@/lib/types";
 
@@ -19,18 +19,40 @@ type Msg = { role: "user" | "assistant"; content: any };
 const SEARCH_TOOL = {
   name: "search_law",
   description:
-    "소방 법령 데이터(법률/시행령/시행규칙/별표/고시/질의회신·법령해석)에서 관련 조문·표를 검색한다. 질문을 분해해 여러 번 호출하고, 본문에 나온 참조(별표 N, 법 제N조 등)도 추가로 검색해 근거 사슬을 끝까지 따라갈 것.",
+    "소방 법령 데이터(법률/시행령/시행규칙/별표/고시/질의회신·법령해석)에서 개념·조건·키워드로 의미검색한다. 질문을 분해해 여러 번 호출하고, 본문에 나온 참조(별표 N, 법 제N조 등)도 추가로 따라갈 것.",
   input_schema: {
     type: "object",
     properties: {
       query: {
         type: "string",
-        description: "검색어. 가능하면 정식 법령 용어로(예: '스프링클러설비 설치대상', '별표 4', '소방안전관리자 선임').",
+        description: "검색어. 가능하면 정식 법령 용어로(예: '스프링클러설비 설치대상', '소방안전관리자 선임').",
       },
     },
     required: ["query"],
   },
 };
+
+const LOOKUP_TOOL = {
+  name: "lookup_article",
+  description:
+    "법령명+조번호 또는 별표번호로 정확히 1:1 조회한다(의미검색보다 정확·확정적). '제13조', '별표 4' 같은 명시적 참조가 있으면 반드시 이 도구를 우선 사용할 것.",
+  input_schema: {
+    type: "object",
+    properties: {
+      law_name: {
+        type: "string",
+        description: "법령명(선택). 예: 소방시설 설치 및 관리에 관한 법률 / 시행령 / 시행규칙",
+      },
+      article: {
+        type: "string",
+        description: "조번호 또는 별표번호. 예: 제13조, 제24조, 별표 4",
+      },
+    },
+    required: ["article"],
+  },
+};
+
+const TOOLS = [SEARCH_TOOL, LOOKUP_TOOL];
 
 function textOf(content: any[]): string {
   return content
@@ -52,6 +74,18 @@ function citationGaps(answer: string, served: Hit[]): string[] {
   const gaps: string[] = [];
   for (const r of refs) if (!hay.includes(r)) gaps.push(r);
   return gaps;
+}
+
+// «» 로 표시된 원문 인용이 검색자료에 "글자 단위로" 실재하는지 검증
+function verifyQuotes(answer: string, served: Hit[]): string[] {
+  const norm = (s: string) => s.replace(/\s+/g, "");
+  const hay = norm(served.map((s) => s.text).join("\n"));
+  const quotes = [...answer.matchAll(/«([^»]{6,})»/g)].map((m) => m[1]);
+  const unverified: string[] = [];
+  for (const q of quotes) {
+    if (!hay.includes(norm(q))) unverified.push(q.length > 60 ? q.slice(0, 60) + "…" : q);
+  }
+  return unverified;
 }
 
 export async function POST(req: Request) {
@@ -92,9 +126,9 @@ export async function POST(req: Request) {
         model: MODEL,
         max_tokens: 8000,
         system: agentSystem,
-        tools: [SEARCH_TOOL as any],
-        // 첫 호출은 반드시 검색하도록 강제, 이후엔 모델 자율
-        tool_choice: round === 0 ? ({ type: "tool", name: "search_law" } as any) : ({ type: "auto" } as any),
+        tools: TOOLS as any,
+        // 첫 호출은 반드시 도구(검색/조회)를 쓰도록 강제, 이후엔 모델 자율
+        tool_choice: round === 0 ? ({ type: "any" } as any) : ({ type: "auto" } as any),
         output_config: { effort: "max" } as any,
         messages,
       });
@@ -117,8 +151,12 @@ export async function POST(req: Request) {
 
       const toolResults: any[] = [];
       for (const tu of toolUses) {
-        const q = (tu.input?.query ?? "").toString();
-        const hits = await search(q, PER_SEARCH_TOPK);
+        let hits: Hit[] = [];
+        if (tu.name === "lookup_article") {
+          hits = lookupExact((tu.input?.law_name ?? "").toString(), (tu.input?.article ?? "").toString());
+        } else {
+          hits = await search((tu.input?.query ?? "").toString(), PER_SEARCH_TOPK);
+        }
         for (const h of hits) {
           if (!servedIds.has(h.id)) {
             servedIds.add(h.id);
@@ -128,7 +166,7 @@ export async function POST(req: Request) {
         toolResults.push({
           type: "tool_result",
           tool_use_id: tu.id,
-          content: hits.length ? formatContext(hits) : "검색결과 없음. 다른 검색어로 시도하세요.",
+          content: hits.length ? formatContext(hits) : "결과 없음. 다른 도구/검색어로 시도하세요.",
         });
       }
       messages.push({ role: "user", content: toolResults });
@@ -140,7 +178,7 @@ export async function POST(req: Request) {
         model: MODEL,
         max_tokens: 8000,
         system: agentSystem,
-        tools: [SEARCH_TOOL as any],
+        tools: TOOLS as any,
         tool_choice: { type: "none" } as any,
         output_config: { effort: "max" } as any,
         messages,
@@ -175,10 +213,27 @@ export async function POST(req: Request) {
       }
     }
 
-    // ── 3) 프로그래밍 인용 검사: 언급한 조/별표가 자료에 실재하는지 ──
+    // ── 3) 기계적 검증: 인용 verbatim 대조 + 조/별표 참조 실재 확인 ──
+    const warnings: string[] = [];
+
+    const badQuotes = verifyQuotes(finalAnswer, served);
+    if (badQuotes.length > 0) {
+      warnings.push(
+        `⛔ 인용 검증 실패: 다음 «원문 인용»이 검색자료에서 글자 단위로 확인되지 않았습니다(신뢰 불가 — 반드시 원문 직접 확인): ${badQuotes
+          .map((q) => `«${q}»`)
+          .join(" / ")}`
+      );
+    }
+
     const gaps = citationGaps(finalAnswer, served);
     if (gaps.length > 0) {
-      finalAnswer += `\n\n⚠️ 자동검사: 답변이 언급한 ${gaps.join(", ")} 에 해당하는 검색자료를 찾지 못했습니다. 해당 부분은 반드시 원문을 직접 확인하세요.`;
+      warnings.push(
+        `⚠️ 참조 검증: 답변이 언급한 ${gaps.join(", ")} 에 해당하는 검색자료를 찾지 못했습니다. 해당 부분은 원문을 직접 확인하세요.`
+      );
+    }
+
+    if (warnings.length > 0) {
+      finalAnswer += `\n\n──────────\n${warnings.join("\n")}`;
     }
 
     return NextResponse.json({
