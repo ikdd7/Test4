@@ -6,7 +6,6 @@
 // ============================================================================
 import fs from "node:fs";
 import path from "node:path";
-import { pipeline } from "@huggingface/transformers";
 
 const ROOT = process.cwd();
 const TOPK = 12;
@@ -55,8 +54,14 @@ async function main() {
     .filter(Boolean)
     .map((l) => JSON.parse(l));
 
-  const extractor = await pipeline("feature-extraction", "Xenova/multilingual-e5-small");
-  const embed = async (t) => Array.from((await extractor("query: " + t, { pooling: "mean", normalize: true })).data);
+  let embed = async () => null;
+  try {
+    const { pipeline } = await import("@huggingface/transformers");
+    const extractor = await pipeline("feature-extraction", "Xenova/multilingual-e5-small");
+    embed = async (t) => Array.from((await extractor("query: " + t, { pooling: "mean", normalize: true })).data);
+  } catch {
+    console.log("(임베딩 사용 불가 → 키워드 전용으로 평가)");
+  }
 
   let pass = 0;
   const fails = [];
