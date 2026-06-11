@@ -1,0 +1,25 @@
+{
+  "name": "fire-law-rag",
+  "version": "1.0.0",
+  "private": true,
+  "description": "대한민국 소방 법령 RAG 안내 챗봇 (법령 정보 안내 도구, 법률 자문 아님)",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "ingest": "node scripts/ingest.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "latest",
+    "@huggingface/transformers": "^3.0.0",
+    "next": "^15.1.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "typescript": "^5"
+  }
+}
