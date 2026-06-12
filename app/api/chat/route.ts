@@ -78,7 +78,9 @@ function citationGaps(answer: string, served: Hit[]): string[] {
 
 // «» 로 표시된 원문 인용이 검색자료에 "글자 단위로" 실재하는지 검증
 function verifyQuotes(answer: string, served: Hit[]): string[] {
-  const norm = (s: string) => s.replace(/\s+/g, "");
+  // 공백 + 마크다운 강조/머리표(**굵게**, *기울임*, `코드`, #, > 등)를 제거해
+  // LLM이 인용에 넣은 서식 때문에 멀쩡한 인용이 "불일치"로 오탐되는 것을 방지.
+  const norm = (s: string) => s.replace(/[\s*_`#>~\[\]]/g, "");
   const hay = norm(served.map((s) => s.text).join("\n"));
   const quotes = [...answer.matchAll(/«([^»]{6,})»/g)].map((m) => m[1]);
   const unverified: string[] = [];
@@ -97,23 +99,15 @@ function refsFrom(q: string): string[] {
 }
 
 async function buildSearchOnly(query: string) {
-  const exact: Hit[] = [];
-  for (const r of refsFrom(query)) exact.push(...lookupExact("", r));
-  const hits = await search(query, 8);
-  const seen = new Set<string>();
-  const merged: Hit[] = [];
-  for (const h of [...exact, ...hits]) {
-    if (!seen.has(h.id)) {
-      seen.add(h.id);
-      merged.push(h);
-    }
-  }
+  // Gemini 경로와 동일한 "법령 최소 보장" 선택 로직을 재사용 — 검색 전용/강등 시에도
+  // 권위 있는 법령(별표·조문)이 수다스러운 질의회신에 밀려 누락되지 않게 한다.
+  const { served } = await retrieveForRead(query);
+  // 표시용: 검색 정밀도용 자식 서브청크(child)는 빼고 부모(별표 전체)/조문만 노출
+  const visible = served.filter((h) => h.role !== "child").sort((a, b) => b.score - a.score);
   const isLaw = (t: string) => ["법률", "시행령", "시행규칙", "별표", "고시"].includes(t);
-  // 법령 우선 표시, 질의회신은 최대 2건만
-  merged.sort((a, b) => b.score - a.score);
-  const lawHits = merged.filter((h) => isLaw(h.type));
-  const interpHits = merged.filter((h) => !isLaw(h.type)).slice(0, 2);
-  const top = [...lawHits, ...interpHits].slice(0, 5);
+  const lawHits = visible.filter((h) => isLaw(h.type)).slice(0, 6);
+  const interpHits = visible.filter((h) => !isLaw(h.type)).slice(0, 2);
+  const top = [...lawHits, ...interpHits];
   const fmt = (h: Hit) => {
     const head = `▸ [${h.type}] ${h.title}${h.article ? " " + h.article : ""} (시행 ${h.date})`;
     const oneText = h.text.replace(/\s+/g, " ").trim();
@@ -179,6 +173,76 @@ async function generateGemini(messages: Msg[], system: string): Promise<string> 
     }
   }
   throw lastErr;
+}
+
+// ── Grok(xAI) 폴백 — Gemini 과부하/실패 시 사용. OpenAI 호환 엔드포인트 ──
+const grokKey = () => process.env.GROK_API_KEY || process.env.XAI_API_KEY || "";
+const GROK_MODELS = Array.from(
+  new Set([process.env.GROK_MODEL || "grok-3", "grok-3-mini", "grok-2-latest", "grok-4"])
+);
+
+async function generateGrok(messages: Msg[], system: string): Promise<string> {
+  const key = grokKey();
+  if (!key) throw new Error("no GROK_API_KEY");
+  const chat = [
+    { role: "system", content: system },
+    ...messages.map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: String(m.content) })),
+  ];
+  let lastErr: any = null;
+  for (const model of GROK_MODELS) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch("https://api.x.ai/v1/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+          body: JSON.stringify({ model, messages: chat, temperature: 0 }),
+        });
+        if (!res.ok) {
+          const t = await res.text();
+          lastErr = new Error(`grok ${res.status} ${t.slice(0, 200)}`);
+          const transient = /50[239]|429|overload|rate limit|unavailable/i.test(`${res.status} ${t}`);
+          if (transient && attempt === 0) {
+            await sleep(1500);
+            continue;
+          }
+          break; // 다음 모델
+        }
+        const j: any = await res.json();
+        const text = j?.choices?.[0]?.message?.content || "";
+        if (text) return text;
+        lastErr = new Error("grok empty response");
+        break;
+      } catch (e: any) {
+        lastErr = e;
+        if (attempt === 0) {
+          await sleep(1500);
+          continue;
+        }
+        break;
+      }
+    }
+  }
+  throw lastErr;
+}
+
+// 통합 생성: Gemini 우선 → 실패 시 Grok 폴백. 둘 다 없거나 실패하면 throw.
+async function generateLLM(messages: Msg[], system: string): Promise<string> {
+  const errs: string[] = [];
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      return await generateGemini(messages, system);
+    } catch (e: any) {
+      errs.push("gemini: " + String(e?.message || e).slice(0, 120));
+    }
+  }
+  if (grokKey()) {
+    try {
+      return await generateGrok(messages, system);
+    } catch (e: any) {
+      errs.push("grok: " + String(e?.message || e).slice(0, 120));
+    }
+  }
+  throw new Error(errs.join(" | ") || "no LLM provider configured");
 }
 
 // 동적 근거 선택: 질문 난이도에 따라 건수가 변동(점수 임계 + 하한/상한 + 계층 커버리지).
@@ -249,7 +313,7 @@ async function retrieveForRead(query: string): Promise<{ served: Hit[]; context:
 async function answerGemini(incoming: Msg[], lastUser: string) {
   const { served, context } = await retrieveForRead(lastUser);
   if (served.length === 0) {
-    return { answer: "검색된 자료에 없습니다. (제공된 법령 데이터에서 관련 조문을 찾지 못했습니다.)", sources: [], mode: "gemini" };
+    return { answer: "검색된 자료에 없습니다. (제공된 법령 데이터에서 관련 조문을 찾지 못했습니다.)", sources: [], mode: "llm" };
   }
   const system = `${SYSTEM_PROMPT}
 
@@ -259,12 +323,12 @@ ${context}`;
 
   let draft: string;
   try {
-    draft = await generateGemini(incoming, system);
+    draft = await generateLLM(incoming, system); // Gemini → 실패 시 Grok 폴백
   } catch (e: any) {
-    // 모든 모델 과부하/실패 → 검색 결과(원문)라도 표시(우아한 강등)
+    // Gemini·Grok 모두 실패 → 검색 결과(원문)라도 표시(우아한 강등)
     const fb = await buildSearchOnly(lastUser);
     fb.answer =
-      "⚠️ LLM(제미나이) 일시 오류로 정리된 답변을 만들지 못했습니다(과부하일 수 있음 — 잠시 후 다시 시도). 아래는 검색된 근거 원문입니다.\n\n" +
+      "⚠️ LLM(Gemini·Grok) 일시 오류로 정리된 답변을 만들지 못했습니다(과부하일 수 있음 — 잠시 후 다시 시도). 아래는 검색된 근거 원문입니다.\n\n" +
       fb.answer;
     return fb;
   }
@@ -274,7 +338,7 @@ ${context}`;
     const sourcesText = served
       .map((s, i) => `[원본자료 ${i + 1}] ${s.type} | ${s.title} | ${s.article || ""} | ${s.date}\n${s.text}`)
       .join("\n──────────\n");
-    const verified = await generateGemini(
+    const verified = await generateLLM(
       [{ role: "user", content: `[원본 자료]\n${sourcesText}\n\n────────────────\n[검증 대상 답변]\n${draft}` }],
       VERIFY_PROMPT
     );
@@ -293,7 +357,7 @@ ${context}`;
   return {
     answer: finalAnswer,
     sources: served.map((h) => ({ type: h.type, title: h.title, article: h.article, date: h.date })),
-    mode: "gemini",
+    mode: "llm",
   };
 }
 
@@ -311,20 +375,23 @@ export async function POST(req: Request) {
     });
   }
 
-  // 공급자 자동 선택: LLM_PROVIDER 우선 → Gemini 키 → Anthropic 키 → 없으면 검색전용
+  // 공급자 자동 선택: LLM_PROVIDER 우선 → Gemini/Grok 키 → Anthropic 키 → 없으면 검색전용
+  const hasGeminiOrGrok = !!(process.env.GEMINI_API_KEY || process.env.GROK_API_KEY || process.env.XAI_API_KEY);
   const provider = (
     process.env.LLM_PROVIDER ||
     (process.env.LLM_MODE === "search"
       ? "search"
-      : process.env.GEMINI_API_KEY
-      ? "gemini"
+      : hasGeminiOrGrok
+      ? "llm"
       : process.env.ANTHROPIC_API_KEY
       ? "anthropic"
       : "search")
   ).toLowerCase();
 
   if (provider === "search") return NextResponse.json(await buildSearchOnly(lastUser));
-  if (provider === "gemini") return NextResponse.json(await answerGemini(incoming, lastUser));
+  // "llm" = Gemini 우선, 실패 시 Grok 폴백 (구버전 호환: "gemini"/"grok"도 동일 경로)
+  if (provider === "llm" || provider === "gemini" || provider === "grok")
+    return NextResponse.json(await answerGemini(incoming, lastUser));
   // provider === "anthropic" → 아래 에이전틱 파이프라인 진행
 
   const anthropic = new Anthropic();

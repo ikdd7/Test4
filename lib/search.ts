@@ -5,6 +5,8 @@ import type { Chunk, Hit, IndexFile } from "./types";
 import { embedQuery } from "./embed";
 
 let cache: IndexFile | null = null;
+let hayCache: string[] | null = null; // 청크별 소문자 검색대상 텍스트(본문+제목+조번호)
+const dfCache = new Map<string, number>(); // 토큰별 문서빈도 캐시
 
 function loadIndex(): IndexFile {
   if (cache) return cache;
@@ -15,6 +17,31 @@ function loadIndex(): IndexFile {
   }
   cache = JSON.parse(fs.readFileSync(p, "utf-8")) as IndexFile;
   return cache;
+}
+
+function haystacks(): string[] {
+  if (hayCache) return hayCache;
+  hayCache = loadIndex().chunks.map((c) =>
+    (c.text + " " + c.title + " " + (c.article || "")).toLowerCase()
+  );
+  return hayCache;
+}
+
+let titleCache: string[] | null = null; // 청크별 제목+조번호(필드 가중용)
+function titleHays(): string[] {
+  if (titleCache) return titleCache;
+  titleCache = loadIndex().chunks.map((c) => (c.title + " " + (c.article || "")).toLowerCase());
+  return titleCache;
+}
+
+// 토큰을 부분문자열로 포함하는 청크 수(한국어 조사 결합 대응 위해 부분일치 사용)
+function docFreq(token: string): number {
+  const cached = dfCache.get(token);
+  if (cached !== undefined) return cached;
+  let df = 0;
+  for (const h of haystacks()) if (h.includes(token)) df++;
+  dfCache.set(token, df);
+  return df;
 }
 
 export function indexSize(): number {
@@ -42,14 +69,30 @@ function tokenize(s: string): string[] {
   return (s.toLowerCase().match(/[\p{L}\p{N}]+/gu) || []).filter((t) => t.length >= 1);
 }
 
-// 질의 토큰 + 동의어 확장 토큰
+// 한국어 조사·어미 제거(긴 것 우선) — "과태료가"→"과태료", "비상구를"→"비상구".
+// 원문은 조사가 다르게 붙어 있어, 질의어를 어간으로 만들어야 부분일치가 된다.
+const PARTICLES = [
+  "으로서", "으로써", "이라고", "라고는", "에서는", "으로", "이라는", "라는", "에서", "에게",
+  "한테", "까지", "부터", "마저", "조차", "이나", "이란", "이라", "처럼", "보다", "만큼",
+  "대로", "인가요", "입니까", "인가", "나요", "가요", "까요", "이고", "고요",
+  "을", "를", "이", "가", "은", "는", "에", "의", "로", "와", "과", "도", "만", "나", "요",
+];
+function destem(tok: string): string {
+  for (const p of PARTICLES) {
+    if (tok.length > p.length + 1 && tok.endsWith(p)) return tok.slice(0, tok.length - p.length);
+  }
+  return tok;
+}
+
+// 질의 토큰 + 조사제거 어간 + 동의어 확장 토큰
 function expandedTokens(query: string): string[] {
   const base = tokenize(query);
+  const stems = base.map(destem).filter((t) => t.length >= 2);
   const extra: string[] = [];
   for (const key of Object.keys(SYNONYMS)) {
     if (query.includes(key)) for (const v of SYNONYMS[key]) extra.push(...tokenize(v));
   }
-  return [...base, ...extra];
+  return [...base, ...stems, ...extra];
 }
 
 function exactRefs(q: string): string[] {
@@ -66,12 +109,26 @@ function cosine(a: number[], b: number[]): number {
   return dot;
 }
 
-function keywordScore(chunk: Chunk, qTokens: Set<string>): number {
-  if (qTokens.size === 0) return 0;
-  const hay = (chunk.text + " " + chunk.title + " " + (chunk.article || "")).toLowerCase();
-  let hit = 0;
-  for (const t of qTokens) if (hay.includes(t)) hit++;
-  return hit / qTokens.size;
+// IDF 가중 키워드 점수: 흔한 단어보다 "과태료"처럼 희귀·결정적인 단어를 크게 반영.
+// (기존엔 단순 일치 개수라 큰 문서가 흔한 단어를 많이 가졌다는 이유로 유리해지는 길이편향이 있었음)
+// + 제목/조번호 일치는 추가 가중 — 별표 제목("과태료의 부과기준" 등)이 핵심 의도를 담으므로.
+const TITLE_BOOST = 0.8;
+function keywordScore(
+  hay: string,
+  titleHay: string,
+  qTokens: string[],
+  idf: Map<string, number>,
+  idfTotal: number
+): number {
+  if (idfTotal <= 0) return 0;
+  let num = 0;
+  for (const t of qTokens) {
+    const w = idf.get(t) || 0;
+    if (!w) continue;
+    if (hay.includes(t)) num += w;
+    if (titleHay.includes(t)) num += w * TITLE_BOOST; // 제목 일치 시 추가
+  }
+  return num / idfTotal;
 }
 
 // ── 정확 조회: 법령명 + 조/별표 번호로 1:1 매칭 (의미검색보다 정확, 100% 보장) ──
@@ -96,8 +153,14 @@ export async function search(query: string, topK = 12): Promise<Hit[]> {
   const { chunks } = loadIndex();
   if (chunks.length === 0) return [];
 
-  const qTokens = new Set(expandedTokens(query));
+  const qTokens = [...new Set(expandedTokens(query))];
   const refs = exactRefs(query);
+
+  // 질의 토큰별 IDF 가중치(희귀어 우대) — 길이편향 제거의 핵심
+  const N = chunks.length;
+  const idf = new Map<string, number>();
+  for (const t of qTokens) idf.set(t, Math.log(1 + N / (1 + docFreq(t))));
+  const idfTotal = qTokens.reduce((s, t) => s + (idf.get(t) || 0), 0);
 
   let qvec: number[] | null = null;
   try {
@@ -106,8 +169,10 @@ export async function search(query: string, topK = 12): Promise<Hit[]> {
     console.error("[search] query embedding failed, keyword-only fallback:", e);
   }
 
-  const scored: Hit[] = chunks.map((c) => {
-    const kw = keywordScore(c, qTokens);
+  const hays = haystacks();
+  const tHays = titleHays();
+  const scored: Hit[] = chunks.map((c, i) => {
+    const kw = keywordScore(hays[i], tHays[i], qTokens, idf, idfTotal);
     const vec = qvec && c.embedding ? (cosine(qvec, c.embedding) + 1) / 2 : 0;
     let score = qvec && c.embedding ? 0.55 * vec + 0.45 * kw : kw;
     for (const r of refs) {
