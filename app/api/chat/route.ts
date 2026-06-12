@@ -177,20 +177,50 @@ async function generateGemini(messages: Msg[], system: string): Promise<string> 
   throw lastErr;
 }
 
+// 동적 근거 선택: 질문 난이도에 따라 건수가 변동(점수 임계 + 하한/상한 + 계층 커버리지).
+//  환경변수로 조정: RAG_MIN(기본 8) · RAG_MAX(기본 24) · RAG_RATIO(기본 0.5)
 async function retrieveForRead(query: string): Promise<{ served: Hit[]; context: string }> {
+  const MIN = Math.max(1, parseInt(process.env.RAG_MIN || "8", 10) || 8);
+  const MAX = Math.max(MIN, parseInt(process.env.RAG_MAX || "24", 10) || 24);
+  const RATIO = Math.min(0.95, Math.max(0.05, parseFloat(process.env.RAG_RATIO || "0.5") || 0.5));
+
   const exact: Hit[] = [];
   for (const r of refsFrom(query)) exact.push(...lookupExact("", r));
-  const hits = await search(query, 14);
-  const seen = new Set<string>();
-  const served: Hit[] = [];
-  for (const h of [...exact, ...hits]) {
-    if (!seen.has(h.id)) {
-      seen.add(h.id);
-      served.push(h);
+  const pool = await search(query, 40); // 넉넉히 후보 확보
+
+  const byId = new Map<string, Hit>();
+  for (const h of [...exact, ...pool]) if (!byId.has(h.id)) byId.set(h.id, h);
+  const all = [...byId.values()].sort((a, b) => b.score - a.score);
+  if (all.length === 0) return { served: [], context: "" };
+
+  const topScore = all[0].score;
+  const exactIds = new Set(exact.map((h) => h.id));
+  const picked = new Map<string, Hit>();
+  const add = (h: Hit) => {
+    if (!picked.has(h.id) && picked.size < MAX) picked.set(h.id, h);
+  };
+
+  // 1) 명시 참조(제N조/별표 N)는 항상 포함 (순위 무관)
+  for (const h of all) if (exactIds.has(h.id)) add(h);
+  // 2) 점수 임계: 최고점의 RATIO 이상 (질문이 명확하면 적게, 광범위하면 많이 → 동적)
+  for (const h of all) if (h.score >= topScore * RATIO) add(h);
+  // 3) 하한 보장
+  for (const h of all) {
+    if (picked.size >= MIN) break;
+    add(h);
+  }
+  // 4) 계층 커버리지: 빠진 자료유형(법률/령/규칙/별표/고시/회신)의 최상위 1건 보강
+  const types = new Set([...picked.values()].map((h) => h.type));
+  for (const h of all) {
+    if (picked.size >= MAX) break;
+    if (!types.has(h.type)) {
+      add(h);
+      types.add(h.type);
     }
   }
-  const top = served.slice(0, 16);
-  return { served: top, context: formatContext(top) };
+
+  const served = [...picked.values()];
+  return { served, context: formatContext(served) };
 }
 
 async function answerGemini(incoming: Msg[], lastUser: string) {
