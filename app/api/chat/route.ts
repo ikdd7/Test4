@@ -395,11 +395,13 @@ async function answerGemini(incoming: Msg[], lastUser: string) {
   }
 
   // 에이전틱 보강: 자료 간 참조 사슬(등급 정의→설치 기준 등)을 모델이 직접 따라가게 함
+  const initialCount = served.length;
   try {
     await agentAugment(lastUser, served);
   } catch {
     /* 보강 실패해도 초기 자료로 진행 */
   }
+  const agentAdded = served.slice(initialCount); // 모델이 "꼭 필요하다"고 요청해 가져온 자료
 
   const context = formatContext(served);
   const system = `${SYSTEM_PROMPT}
@@ -409,9 +411,11 @@ async function answerGemini(incoming: Msg[], lastUser: string) {
 ${context}`;
 
   // Groq 무료 모델은 토큰 한도가 작아 컨텍스트를 압축해서 보냄(413 Request too large 방지)
+  // 중요: 에이전트 보강 자료가 목록 끝에 붙으므로, 단순 slice하면 정작 핵심 근거가 잘림 → 보강분 우선 포함
   const GROQ_MAX_CHUNKS = Math.max(1, parseInt(process.env.GROQ_MAX_CHUNKS || "8", 10) || 8);
   const GROQ_MAX_PER_CHUNK = Math.max(200, parseInt(process.env.GROQ_MAX_PER_CHUNK || "700", 10) || 700);
-  const compactContext = formatContext(served.slice(0, GROQ_MAX_CHUNKS), GROQ_MAX_PER_CHUNK);
+  const compactPick = [...agentAdded, ...served.slice(0, initialCount)].slice(0, GROQ_MAX_CHUNKS);
+  const compactContext = formatContext(compactPick, GROQ_MAX_PER_CHUNK);
   const compactSystem = `${SYSTEM_PROMPT}
 
 ────────── [검색자료] (아래 자료만 근거로 사용. 없는 내용은 "검색된 자료에 없습니다") ──────────
@@ -447,21 +451,25 @@ ${compactContext}`;
     return fb;
   }
 
-  // 검증 패스: Gemini로 초안을 원본과 대조(큰 컨텍스트라 Groq 폴백 시엔 413 방지 위해 생략)
+  // 검증 패스: 초안을 원본과 대조해 인용·수치 불일치 정정.
+  //  Gemini 경로 = 전체 원본 / Groq 경로 = 압축 원본(413 방지) — 환각(수치 창작) 방어라 생략하지 않음
   let finalAnswer = draft;
-  if (!usedGroq) {
-    try {
-      const sourcesText = served
-        .map((s, i) => `[원본자료 ${i + 1}] ${s.type} | ${s.title} | ${s.article || ""} | ${s.date}\n${s.text}`)
-        .join("\n──────────\n");
-      const verified = await generateGemini(
-        [{ role: "user", content: `[원본 자료]\n${sourcesText}\n\n────────────────\n[검증 대상 답변]\n${draft}` }],
-        VERIFY_PROMPT
-      );
-      if (verified) finalAnswer = verified;
-    } catch {
-      /* 검증 실패 시 초안 유지 */
-    }
+  try {
+    const verifySources = usedGroq ? compactPick : served;
+    const cap = usedGroq ? GROQ_MAX_PER_CHUNK : 0;
+    const sourcesText = verifySources
+      .map((s, i) => {
+        const body = cap > 0 && s.text.length > cap ? s.text.slice(0, cap) + " …(이하 생략)" : s.text;
+        return `[원본자료 ${i + 1}] ${s.type} | ${s.title} | ${s.article || ""} | ${s.date}\n${body}`;
+      })
+      .join("\n──────────\n");
+    const verifyMsg: Msg[] = [
+      { role: "user", content: `[원본 자료]\n${sourcesText}\n\n────────────────\n[검증 대상 답변]\n${draft}` },
+    ];
+    const verified = usedGroq ? await generateGroq(verifyMsg, VERIFY_PROMPT) : await generateGemini(verifyMsg, VERIFY_PROMPT);
+    if (verified) finalAnswer = verified;
+  } catch {
+    /* 검증 실패 시 초안 유지 */
   }
 
   const warnings: string[] = [];
@@ -471,10 +479,15 @@ ${compactContext}`;
   if (gaps.length) warnings.push(`⚠️ 참조 검증: ${gaps.join(", ")} 에 해당하는 검색자료를 찾지 못했습니다. 원문을 직접 확인하세요.`);
   if (warnings.length) finalAnswer += `\n\n──────────\n${warnings.join("\n")}`;
 
+  // 생성 모델 표기(품질 문제 추적용): Groq 폴백 답변은 정확도가 낮을 수 있음을 명시
+  finalAnswer += usedGroq
+    ? `\n\n─ 생성: Groq(보조 모델, Gemini 일시 불가로 대체 — 중요 사안은 재질문 권장)`
+    : ``;
+
   return {
     answer: finalAnswer,
     sources: served.map((h) => ({ type: h.type, title: h.title, article: h.article, date: h.date })),
-    mode: "llm",
+    mode: usedGroq ? "llm-groq" : "llm-gemini",
   };
 }
 
