@@ -116,6 +116,28 @@ form.inputbar button {
   font-size: 14.5px;
   cursor: pointer;
 }
+form.inputbar button.mic {
+  background: #fff;
+  border: 1px solid #cdd2da;
+  color: #333;
+  padding: 0 12px;
+  font-size: 18px;
+}
+form.inputbar button.mic.on {
+  background: #b71c1c;
+  border-color: #b71c1c;
+  color: #fff;
+  animation: micpulse 1s ease-in-out infinite;
+}
+@keyframes micpulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(183, 28, 28, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(183, 28, 28, 0);
+  }
+}
 form.inputbar button:disabled {
   opacity: 0.5;
   cursor: default;

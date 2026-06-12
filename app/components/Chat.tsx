@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 type Source = { type: string; title: string; article: string | null; date: string };
@@ -52,6 +52,41 @@ export default function Chat() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const chatRef = useRef<HTMLDivElement>(null);
+
+  // 음성 인식(브라우저 내장 Web Speech API — 키·비용 없음)
+  const [micSupported, setMicSupported] = useState(false);
+  const [listening, setListening] = useState(false);
+  const recogRef = useRef<any>(null);
+
+  useEffect(() => {
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    setMicSupported(!!SR);
+  }, []);
+
+  function toggleMic() {
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SR) return;
+    if (listening) {
+      recogRef.current?.stop();
+      return;
+    }
+    const rec = new SR();
+    rec.lang = "ko-KR";
+    rec.interimResults = true;
+    rec.continuous = false;
+    rec.maxAlternatives = 1;
+    const base = input.trim() ? input.trim() + " " : "";
+    rec.onresult = (e: any) => {
+      let txt = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) txt += e.results[i][0].transcript;
+      setInput(base + txt);
+    };
+    rec.onend = () => setListening(false);
+    rec.onerror = () => setListening(false);
+    recogRef.current = rec;
+    setListening(true);
+    rec.start();
+  }
 
   function scrollDown() {
     requestAnimationFrame(() => {
@@ -145,11 +180,26 @@ export default function Chat() {
       </div>
 
       <form className="inputbar" onSubmit={send}>
+        {micSupported && (
+          <button
+            type="button"
+            className={`mic ${listening ? "on" : ""}`}
+            onClick={toggleMic}
+            title={listening ? "듣는 중… (눌러서 중지)" : "음성으로 질문하기"}
+            aria-label="음성 입력"
+          >
+            {listening ? "■" : "🎤"}
+          </button>
+        )}
         <textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={onKeyDown}
-          placeholder="예) 소방시설법 제13조 알려줘 / 11층 업무시설에 스프링클러 설치 대상인가요?"
+          placeholder={
+            listening
+              ? "말씀하세요… (음성 인식 중)"
+              : "예) 소방시설법 제13조 알려줘 / 11층 업무시설에 스프링클러 설치 대상인가요?"
+          }
         />
         <button disabled={busy || !input.trim()}>전송</button>
       </form>
