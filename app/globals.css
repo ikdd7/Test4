@@ -102,6 +102,13 @@ form.inputbar {
   flex: 1;
   display: flex;
 }
+.mic-msg {
+  background: #fff3f3;
+  color: #b71c1c;
+  font-size: 12.5px;
+  padding: 7px 12px;
+  border-top: 1px solid #f0d4d4;
+}
 form.inputbar textarea {
   flex: 1;
   width: 100%;

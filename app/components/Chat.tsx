@@ -56,12 +56,30 @@ export default function Chat() {
   // 음성 인식(브라우저 내장 Web Speech API — 키·비용 없음)
   const [micSupported, setMicSupported] = useState(false);
   const [listening, setListening] = useState(false);
+  const [micMsg, setMicMsg] = useState("");
   const recogRef = useRef<any>(null);
+  const taRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     setMicSupported(!!SR);
   }, []);
+
+  function micErrorText(code: string): string {
+    switch (code) {
+      case "not-allowed":
+      case "service-not-allowed":
+        return "마이크 권한이 거부되었습니다. 주소창의 🔒(자물쇠) → 마이크 ‘허용’ 후 다시 시도하세요.";
+      case "no-speech":
+        return "음성이 감지되지 않았습니다. 🎤를 다시 눌러 또렷이 말씀해 주세요.";
+      case "audio-capture":
+        return "마이크를 찾을 수 없습니다. 기기 마이크를 확인하세요.";
+      case "network":
+        return "음성 인식 서버 연결 오류(네트워크). 잠시 후 다시 시도하세요.";
+      default:
+        return "음성 인식 오류: " + code;
+    }
+  }
 
   function toggleMic() {
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -70,22 +88,35 @@ export default function Chat() {
       recogRef.current?.stop();
       return;
     }
+    setMicMsg("");
     const rec = new SR();
     rec.lang = "ko-KR";
     rec.interimResults = true;
     rec.continuous = false;
     rec.maxAlternatives = 1;
     const base = input.trim() ? input.trim() + " " : "";
+    rec.onstart = () => {
+      setListening(true);
+      taRef.current?.focus(); // 입력창에 커서가 깜빡이도록
+    };
     rec.onresult = (e: any) => {
       let txt = "";
       for (let i = e.resultIndex; i < e.results.length; i++) txt += e.results[i][0].transcript;
       setInput(base + txt);
+      taRef.current?.focus();
+    };
+    rec.onerror = (e: any) => {
+      setListening(false);
+      setMicMsg(micErrorText(e?.error || "unknown"));
     };
     rec.onend = () => setListening(false);
-    rec.onerror = () => setListening(false);
     recogRef.current = rec;
-    setListening(true);
-    rec.start();
+    taRef.current?.focus();
+    try {
+      rec.start();
+    } catch {
+      // 이미 시작된 경우 등 — 무시
+    }
   }
 
   function scrollDown() {
@@ -179,9 +210,11 @@ export default function Chat() {
         )}
       </div>
 
+      {micMsg && <div className="mic-msg">{micMsg}</div>}
       <form className="inputbar" onSubmit={send}>
         <div className="ta-wrap">
           <textarea
+            ref={taRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
