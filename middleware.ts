@@ -12,8 +12,13 @@ async function authToken(password: string, salt: string): Promise<string> {
 
 export async function middleware(req: NextRequest) {
   const password = process.env.APP_PASSWORD || "";
+
+  // APP_PASSWORD가 설정되지 않았으면 게이트 없이 공개(테스트 모드).
+  // 보호하려면 Vercel 환경변수에 APP_PASSWORD 추가 후 Redeploy 하세요.
+  if (!password) return NextResponse.next();
+
   const salt = process.env.AUTH_SALT || "fire-law";
-  const expected = password ? await authToken(password, salt) : "__no_password_set__";
+  const expected = await authToken(password, salt);
   const cookie = req.cookies.get("fl_auth")?.value;
 
   if (cookie && cookie === expected) return NextResponse.next();
