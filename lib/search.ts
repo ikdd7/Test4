@@ -191,7 +191,7 @@ export async function search(query: string, topK = 12): Promise<Hit[]> {
 }
 
 const ORDER = ["법률", "시행령", "시행규칙", "별표", "고시", "법령해석", "질의회신"];
-export function formatContext(hits: Hit[]): string {
+export function formatContext(hits: Hit[], maxPerChunk = 0): string {
   const sorted = [...hits].sort((a, b) => ORDER.indexOf(a.type) - ORDER.indexOf(b.type));
   return sorted
     .map((h, i) => {
@@ -204,7 +204,12 @@ export function formatContext(hits: Hit[]): string {
       ]
         .filter(Boolean)
         .join(" | ");
-      return `[검색자료 ${i + 1}] ${meta}\n[조문 원문]\n${h.text}`;
+      // maxPerChunk>0이면 본문을 잘라 토큰 한도가 작은 모델(예: Groq 무료)에서도 보낼 수 있게 함
+      const text =
+        maxPerChunk > 0 && h.text.length > maxPerChunk
+          ? h.text.slice(0, maxPerChunk) + " …(이하 생략 — 표/조문 일부)"
+          : h.text;
+      return `[검색자료 ${i + 1}] ${meta}\n[조문 원문]\n${text}`;
     })
     .join("\n\n──────────\n\n");
 }

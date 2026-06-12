@@ -134,13 +134,13 @@ async function buildSearchOnly(query: string) {
 }
 
 // 과부하(503)·레이트리밋(429) 대비: 재시도 + 모델 자동 폴백
+// (구글이 폐기한 gemini-1.5는 제외 — 현행 2.x 계열만 사용)
 const GEMINI_MODELS = Array.from(
   new Set([
     process.env.GEMINI_MODEL || "gemini-2.0-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.0-flash",
     "gemini-2.5-flash",
-    "gemini-1.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash-lite",
   ])
 );
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -226,26 +226,6 @@ async function generateGroq(messages: Msg[], system: string): Promise<string> {
   throw lastErr;
 }
 
-// 통합 생성: Gemini 우선 → 실패 시 Groq(무료) 폴백. 둘 다 없거나 실패하면 throw.
-async function generateLLM(messages: Msg[], system: string): Promise<string> {
-  const errs: string[] = [];
-  if (process.env.GEMINI_API_KEY) {
-    try {
-      return await generateGemini(messages, system);
-    } catch (e: any) {
-      errs.push("gemini: " + String(e?.message || e).slice(0, 120));
-    }
-  }
-  if (groqKey()) {
-    try {
-      return await generateGroq(messages, system);
-    } catch (e: any) {
-      errs.push("groq: " + String(e?.message || e).slice(0, 120));
-    }
-  }
-  throw new Error(errs.join(" | ") || "no LLM provider configured");
-}
-
 // 동적 근거 선택: 질문 난이도에 따라 건수가 변동(점수 임계 + 하한/상한 + 계층 커버리지).
 //  환경변수로 조정: RAG_MIN(기본 8) · RAG_MAX(기본 24) · RAG_RATIO(기본 0.5)
 const isInterp = (t: string) => t === "질의회신" || t === "법령해석";
@@ -322,12 +302,37 @@ async function answerGemini(incoming: Msg[], lastUser: string) {
 
 ${context}`;
 
-  let draft: string;
-  try {
-    draft = await generateLLM(incoming, system); // Gemini → 실패 시 Groq(무료) 폴백
-  } catch (e: any) {
-    // Gemini·Groq 모두 실패 → 검색 결과(원문)라도 표시(우아한 강등)
-    const reason = String(e?.message || e).slice(0, 400);
+  // Groq 무료 모델은 토큰 한도가 작아 컨텍스트를 압축해서 보냄(413 Request too large 방지)
+  const GROQ_MAX_CHUNKS = Math.max(1, parseInt(process.env.GROQ_MAX_CHUNKS || "8", 10) || 8);
+  const GROQ_MAX_PER_CHUNK = Math.max(200, parseInt(process.env.GROQ_MAX_PER_CHUNK || "700", 10) || 700);
+  const compactContext = formatContext(served.slice(0, GROQ_MAX_CHUNKS), GROQ_MAX_PER_CHUNK);
+  const compactSystem = `${SYSTEM_PROMPT}
+
+────────── [검색자료] (아래 자료만 근거로 사용. 없는 내용은 "검색된 자료에 없습니다") ──────────
+
+${compactContext}`;
+
+  // 1) Gemini(전체 컨텍스트) → 실패 시 2) Groq(압축 컨텍스트) → 둘 다 실패 시 검색전용
+  let draft = "";
+  let usedGroq = false;
+  const errs: string[] = [];
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      draft = await generateGemini(incoming, system);
+    } catch (e: any) {
+      errs.push("gemini: " + String(e?.message || e).slice(0, 160));
+    }
+  }
+  if (!draft && groqKey()) {
+    try {
+      draft = await generateGroq(incoming, compactSystem);
+      usedGroq = true;
+    } catch (e: any) {
+      errs.push("groq: " + String(e?.message || e).slice(0, 160));
+    }
+  }
+  if (!draft) {
+    const reason = errs.join(" | ") || "LLM 미설정";
     console.error("[chat] LLM failed:", reason);
     const fb = await buildSearchOnly(lastUser);
     fb.answer =
@@ -336,18 +341,21 @@ ${context}`;
     return fb;
   }
 
+  // 검증 패스: Gemini로 초안을 원본과 대조(큰 컨텍스트라 Groq 폴백 시엔 413 방지 위해 생략)
   let finalAnswer = draft;
-  try {
-    const sourcesText = served
-      .map((s, i) => `[원본자료 ${i + 1}] ${s.type} | ${s.title} | ${s.article || ""} | ${s.date}\n${s.text}`)
-      .join("\n──────────\n");
-    const verified = await generateLLM(
-      [{ role: "user", content: `[원본 자료]\n${sourcesText}\n\n────────────────\n[검증 대상 답변]\n${draft}` }],
-      VERIFY_PROMPT
-    );
-    if (verified) finalAnswer = verified;
-  } catch {
-    /* 검증 실패 시 초안 유지 */
+  if (!usedGroq) {
+    try {
+      const sourcesText = served
+        .map((s, i) => `[원본자료 ${i + 1}] ${s.type} | ${s.title} | ${s.article || ""} | ${s.date}\n${s.text}`)
+        .join("\n──────────\n");
+      const verified = await generateGemini(
+        [{ role: "user", content: `[원본 자료]\n${sourcesText}\n\n────────────────\n[검증 대상 답변]\n${draft}` }],
+        VERIFY_PROMPT
+      );
+      if (verified) finalAnswer = verified;
+    } catch {
+      /* 검증 실패 시 초안 유지 */
+    }
   }
 
   const warnings: string[] = [];
