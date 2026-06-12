@@ -178,7 +178,7 @@ async function generateGemini(messages: Msg[], system: string): Promise<string> 
 // ── Grok(xAI) 폴백 — Gemini 과부하/실패 시 사용. OpenAI 호환 엔드포인트 ──
 const grokKey = () => process.env.GROK_API_KEY || process.env.XAI_API_KEY || "";
 const GROK_MODELS = Array.from(
-  new Set([process.env.GROK_MODEL || "grok-3", "grok-3-mini", "grok-2-latest", "grok-4"])
+  new Set([process.env.GROK_MODEL || "grok-3", "grok-4", "grok-3-mini", "grok-2-latest", "grok-beta"])
 );
 
 async function generateGrok(messages: Msg[], system: string): Promise<string> {
@@ -326,9 +326,11 @@ ${context}`;
     draft = await generateLLM(incoming, system); // Gemini → 실패 시 Grok 폴백
   } catch (e: any) {
     // Gemini·Grok 모두 실패 → 검색 결과(원문)라도 표시(우아한 강등)
+    const reason = String(e?.message || e).slice(0, 400);
+    console.error("[chat] LLM failed:", reason);
     const fb = await buildSearchOnly(lastUser);
     fb.answer =
-      "⚠️ LLM(Gemini·Grok) 일시 오류로 정리된 답변을 만들지 못했습니다(과부하일 수 있음 — 잠시 후 다시 시도). 아래는 검색된 근거 원문입니다.\n\n" +
+      `⚠️ LLM 일시 오류로 정리된 답변을 만들지 못했습니다.\n(진단 원인: ${reason})\n아래는 검색된 근거 원문입니다.\n\n` +
       fb.answer;
     return fb;
   }
