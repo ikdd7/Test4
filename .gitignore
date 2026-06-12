@@ -25,6 +25,7 @@ yarn-error.log*
 
 # typescript
 next-env.d.ts
+*.tsbuildinfo
 
 # 로컬 임베딩 모델 캐시
 .cache/
