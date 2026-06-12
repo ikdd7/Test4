@@ -316,6 +316,71 @@ async function expandQuery(q: string): Promise<string> {
   return (out || "").replace(/^[^:]*:/, "").replace(/\s+/g, " ").trim().slice(0, 300);
 }
 
+// ── 에이전틱 보강 라운드(무료 경로용, 함수호출 API 불필요한 텍스트 프로토콜) ──
+// 모델이 확보된 자료를 보고 "추가로 필요한 근거"를 LOOKUP/SEARCH 줄로 요청하면 실행해 합친다.
+// 예) 화재예방법 별표 4(등급 정의)가 「소방시설법 시행령」 별표 4(자탐 기준)를 참조하는 2단 추론 보강.
+const PLANNER_PROMPT = `당신은 대한민국 소방 법령 리서치 플래너입니다.
+[질문]에 정확히 답하려면 [확보된 자료]만으로 충분한지 판단하세요.
+특히 자료 본문이 「○○법 시행령」 별표 N, 법 제N조 같은 다른 조문·별표를 참조하는데 그 원문이 [확보된 자료]에 없다면, 그 원문을 반드시 요청하세요(기준 수치는 참조 원문에 있습니다).
+추가 자료가 필요하면 아래 형식의 줄만 출력하세요(설명 금지, 합계 4줄 이하):
+LOOKUP: 법령명|제N조
+LOOKUP: 법령명|별표 N
+SEARCH: 정식 법령용어 검색어
+더 필요한 자료가 없으면 READY 한 단어만 출력하세요.`;
+
+async function agentAugment(lastUser: string, served: Hit[]): Promise<void> {
+  const ROUNDS = Math.max(0, parseInt(process.env.AGENT_ROUNDS || "2", 10));
+  const CAP = 30; // 컨텍스트 폭주 방지 상한
+  const ids = new Set(served.map((h) => h.id));
+  for (let round = 0; round < ROUNDS && served.length < CAP; round++) {
+    // 플래너에게는 압축 자료만(판단용) — 토큰 절약 + Groq 413 방지
+    const planCtx = formatContext(served.slice(0, 16), 350);
+    const planMsg: Msg[] = [{ role: "user", content: `[질문]\n${lastUser}\n\n[확보된 자료]\n${planCtx}` }];
+    let plan = "";
+    if (process.env.GEMINI_API_KEY) {
+      try {
+        plan = await generateGemini(planMsg, PLANNER_PROMPT);
+      } catch {
+        /* Groq로 */
+      }
+    }
+    if (!plan && groqKey()) {
+      try {
+        plan = await generateGroq(planMsg, PLANNER_PROMPT);
+      } catch {
+        return; // 플래너 불가 — 보강 없이 진행
+      }
+    }
+    if (!plan || /^\s*READY\b/m.test(plan)) return;
+
+    const lookups = [...plan.matchAll(/^\s*LOOKUP:\s*(.+)$/gim)].map((m) => m[1].trim()).slice(0, 3);
+    const searches = [...plan.matchAll(/^\s*SEARCH:\s*(.+)$/gim)].map((m) => m[1].trim()).slice(0, 3);
+    if (lookups.length === 0 && searches.length === 0) return;
+
+    let added = 0;
+    for (const l of lookups) {
+      const [name, art] = l.includes("|") ? l.split("|").map((s) => s.trim()) : ["", l.trim()];
+      for (const h of lookupExact(name, art)) {
+        if (!ids.has(h.id) && served.length < CAP) {
+          ids.add(h.id);
+          served.push(h);
+          added++;
+        }
+      }
+    }
+    for (const q of searches) {
+      for (const h of await search(q, 5)) {
+        if (!ids.has(h.id) && served.length < CAP) {
+          ids.add(h.id);
+          served.push(h);
+          added++;
+        }
+      }
+    }
+    if (added === 0) return; // 더 못 찾으면 종료(무한루프 방지)
+  }
+}
+
 async function answerGemini(incoming: Msg[], lastUser: string) {
   // 명시 참조(제N조/별표 N)가 없는 "사례·개념형" 질문에만 질의 재구성 적용
   let retrievalQuery = lastUser;
@@ -323,10 +388,20 @@ async function answerGemini(incoming: Msg[], lastUser: string) {
     const expansion = await expandQuery(lastUser);
     if (expansion) retrievalQuery = `${lastUser} ${expansion}`;
   }
-  const { served, context } = await retrieveForRead(retrievalQuery);
+  const { served: initialServed } = await retrieveForRead(retrievalQuery);
+  const served: Hit[] = [...initialServed];
   if (served.length === 0) {
     return { answer: "검색된 자료에 없습니다. (제공된 법령 데이터에서 관련 조문을 찾지 못했습니다.)", sources: [], mode: "llm" };
   }
+
+  // 에이전틱 보강: 자료 간 참조 사슬(등급 정의→설치 기준 등)을 모델이 직접 따라가게 함
+  try {
+    await agentAugment(lastUser, served);
+  } catch {
+    /* 보강 실패해도 초기 자료로 진행 */
+  }
+
+  const context = formatContext(served);
   const system = `${SYSTEM_PROMPT}
 
 ────────── [검색자료] (아래 자료만 근거로 사용. 여기에 없는 내용은 "검색된 자료에 없습니다"라고 답하세요) ──────────
