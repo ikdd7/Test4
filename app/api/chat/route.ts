@@ -175,31 +175,32 @@ async function generateGemini(messages: Msg[], system: string): Promise<string> 
   throw lastErr;
 }
 
-// ── Grok(xAI) 폴백 — Gemini 과부하/실패 시 사용. OpenAI 호환 엔드포인트 ──
-const grokKey = () => process.env.GROK_API_KEY || process.env.XAI_API_KEY || "";
-const GROK_MODELS = Array.from(
-  new Set([process.env.GROK_MODEL || "grok-3", "grok-4", "grok-3-mini", "grok-2-latest", "grok-beta"])
+// ── Groq(무료) 폴백 — Gemini 과부하/실패 시 사용. OpenAI 호환 엔드포인트 ──
+//  주의: 유료인 Grok(xAI)이 아니라, 무료 추론 서비스 Groq(groq.com)입니다.
+const groqKey = () => process.env.GROQ_API_KEY || "";
+const GROQ_MODELS = Array.from(
+  new Set([process.env.GROQ_MODEL || "llama-3.3-70b-versatile", "llama-3.1-8b-instant"])
 );
 
-async function generateGrok(messages: Msg[], system: string): Promise<string> {
-  const key = grokKey();
-  if (!key) throw new Error("no GROK_API_KEY");
+async function generateGroq(messages: Msg[], system: string): Promise<string> {
+  const key = groqKey();
+  if (!key) throw new Error("no GROQ_API_KEY");
   const chat = [
     { role: "system", content: system },
     ...messages.map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: String(m.content) })),
   ];
   let lastErr: any = null;
-  for (const model of GROK_MODELS) {
+  for (const model of GROQ_MODELS) {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const res = await fetch("https://api.x.ai/v1/chat/completions", {
+        const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
           body: JSON.stringify({ model, messages: chat, temperature: 0 }),
         });
         if (!res.ok) {
           const t = await res.text();
-          lastErr = new Error(`grok ${res.status} ${t.slice(0, 200)}`);
+          lastErr = new Error(`groq ${res.status} ${t.slice(0, 200)}`);
           const transient = /50[239]|429|overload|rate limit|unavailable/i.test(`${res.status} ${t}`);
           if (transient && attempt === 0) {
             await sleep(1500);
@@ -210,7 +211,7 @@ async function generateGrok(messages: Msg[], system: string): Promise<string> {
         const j: any = await res.json();
         const text = j?.choices?.[0]?.message?.content || "";
         if (text) return text;
-        lastErr = new Error("grok empty response");
+        lastErr = new Error("groq empty response");
         break;
       } catch (e: any) {
         lastErr = e;
@@ -225,7 +226,7 @@ async function generateGrok(messages: Msg[], system: string): Promise<string> {
   throw lastErr;
 }
 
-// 통합 생성: Gemini 우선 → 실패 시 Grok 폴백. 둘 다 없거나 실패하면 throw.
+// 통합 생성: Gemini 우선 → 실패 시 Groq(무료) 폴백. 둘 다 없거나 실패하면 throw.
 async function generateLLM(messages: Msg[], system: string): Promise<string> {
   const errs: string[] = [];
   if (process.env.GEMINI_API_KEY) {
@@ -235,11 +236,11 @@ async function generateLLM(messages: Msg[], system: string): Promise<string> {
       errs.push("gemini: " + String(e?.message || e).slice(0, 120));
     }
   }
-  if (grokKey()) {
+  if (groqKey()) {
     try {
-      return await generateGrok(messages, system);
+      return await generateGroq(messages, system);
     } catch (e: any) {
-      errs.push("grok: " + String(e?.message || e).slice(0, 120));
+      errs.push("groq: " + String(e?.message || e).slice(0, 120));
     }
   }
   throw new Error(errs.join(" | ") || "no LLM provider configured");
@@ -323,9 +324,9 @@ ${context}`;
 
   let draft: string;
   try {
-    draft = await generateLLM(incoming, system); // Gemini → 실패 시 Grok 폴백
+    draft = await generateLLM(incoming, system); // Gemini → 실패 시 Groq(무료) 폴백
   } catch (e: any) {
-    // Gemini·Grok 모두 실패 → 검색 결과(원문)라도 표시(우아한 강등)
+    // Gemini·Groq 모두 실패 → 검색 결과(원문)라도 표시(우아한 강등)
     const reason = String(e?.message || e).slice(0, 400);
     console.error("[chat] LLM failed:", reason);
     const fb = await buildSearchOnly(lastUser);
@@ -377,13 +378,13 @@ export async function POST(req: Request) {
     });
   }
 
-  // 공급자 자동 선택: LLM_PROVIDER 우선 → Gemini/Grok 키 → Anthropic 키 → 없으면 검색전용
-  const hasGeminiOrGrok = !!(process.env.GEMINI_API_KEY || process.env.GROK_API_KEY || process.env.XAI_API_KEY);
+  // 공급자 자동 선택: LLM_PROVIDER 우선 → Gemini/Groq 키 → Anthropic 키 → 없으면 검색전용
+  const hasGeminiOrGroq = !!(process.env.GEMINI_API_KEY || process.env.GROQ_API_KEY);
   const provider = (
     process.env.LLM_PROVIDER ||
     (process.env.LLM_MODE === "search"
       ? "search"
-      : hasGeminiOrGrok
+      : hasGeminiOrGroq
       ? "llm"
       : process.env.ANTHROPIC_API_KEY
       ? "anthropic"
@@ -391,8 +392,8 @@ export async function POST(req: Request) {
   ).toLowerCase();
 
   if (provider === "search") return NextResponse.json(await buildSearchOnly(lastUser));
-  // "llm" = Gemini 우선, 실패 시 Grok 폴백 (구버전 호환: "gemini"/"grok"도 동일 경로)
-  if (provider === "llm" || provider === "gemini" || provider === "grok")
+  // "llm" = Gemini 우선, 실패 시 Groq(무료) 폴백 (구버전 호환: "gemini"/"groq"도 동일 경로)
+  if (provider === "llm" || provider === "gemini" || provider === "groq")
     return NextResponse.json(await answerGemini(incoming, lastUser));
   // provider === "anthropic" → 아래 에이전틱 파이프라인 진행
 
