@@ -108,30 +108,26 @@ async function buildSearchOnly(query: string) {
       merged.push(h);
     }
   }
-  const top = merged.slice(0, 8);
+  const top = merged.slice(0, 5); // 너무 길지 않게 상위 5건
   const isLaw = (t: string) => ["법률", "시행령", "시행규칙", "별표", "고시"].includes(t);
   const fmt = (h: Hit) => {
-    const meta = `[${h.type}] ${h.title}${h.article ? " " + h.article : ""} (시행일/회신일자 ${h.date})`;
-    const text = h.text.length > 2500 ? h.text.slice(0, 2500) + "\n…(원문 일부 생략 — 원문 직접 확인)" : h.text;
-    return `${meta}\n${text}`;
+    const head = `▸ [${h.type}] ${h.title}${h.article ? " " + h.article : ""} (시행 ${h.date})`;
+    const oneText = h.text.replace(/\s+/g, " ").trim();
+    const body = oneText.length > 600 ? oneText.slice(0, 600) + " …(이하 생략 — 원문 확인 필요)" : oneText;
+    return `${head}\n${body}`;
   };
   const law = top.filter((h) => isLaw(h.type));
   const interp = top.filter((h) => !isLaw(h.type));
 
-  let body = "🔎 검색 전용 모드 (LLM 미사용) — 질문을 해석하지 않고, 검색된 ‘원문’만 그대로 보여줍니다.\n\n";
+  let body = "🔎 검색 전용 모드입니다(LLM 미사용). 검색된 근거 원문을 요약 표시합니다.\n";
+  body += "정식 해석·답변을 보려면 GEMINI_API_KEY(무료)를 설정하세요.\n\n";
   if (top.length === 0) {
     body += "검색된 자료에 없습니다.\n\n";
   } else {
-    body += "① [법령 근거] (구속력 있는 규정)\n\n";
-    body += law.length ? law.map(fmt).join("\n\n──────────\n\n") : "(검색된 법령 근거 없음)";
-    body += "\n\n";
-    if (interp.length) {
-      body += "② [해석·참고] (법 자체가 아닌 공식 해석 — 이후 개정으로 달라졌을 수 있음)\n\n";
-      body += interp.map(fmt).join("\n\n──────────\n\n");
-      body += "\n\n";
-    }
+    body += "■ [법령 근거]\n" + (law.length ? law.map(fmt).join("\n\n") : "(없음)") + "\n";
+    if (interp.length) body += "\n■ [해석·참고] (개정으로 달라졌을 수 있음)\n" + interp.map(fmt).join("\n\n") + "\n";
   }
-  body += `※ ${DISCLAIMER}`;
+  body += `\n※ ${DISCLAIMER}`;
   return {
     answer: body,
     mode: "search",
