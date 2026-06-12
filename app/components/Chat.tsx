@@ -1,9 +1,51 @@
 "use client";
 
 import { useRef, useState } from "react";
+import type { ReactNode } from "react";
 
 type Source = { type: string; title: string; article: string | null; date: string };
 type Msg = { role: "user" | "assistant"; content: string; sources?: Source[] };
+
+// 인라인 마크다운: **굵게**, `코드`
+function inlineParse(text: string): ReactNode[] {
+  const parts: ReactNode[] = [];
+  const re = /\*\*([^*]+)\*\*|`([^`]+)`/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let i = 0;
+  while ((m = re.exec(text))) {
+    if (m.index > last) parts.push(text.slice(last, m.index));
+    if (m[1] !== undefined) parts.push(<strong key={i++}>{m[1]}</strong>);
+    else parts.push(<code key={i++}>{m[2]}</code>);
+    last = re.lastIndex;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return parts;
+}
+
+// 줄 단위: # 제목 → 굵게, * / - 글머리 → •
+function renderRich(text: string): ReactNode {
+  const lines = text.split("\n");
+  return lines.map((line, idx) => {
+    const tail = idx < lines.length - 1 ? "\n" : "";
+    const h = line.match(/^\s*(#{1,6})\s+(.*)$/);
+    if (h) {
+      return (
+        <span key={idx}>
+          <strong>{inlineParse(h[2])}</strong>
+          {tail}
+        </span>
+      );
+    }
+    const bulleted = line.replace(/^(\s*)[*-]\s+/, "$1• ");
+    return (
+      <span key={idx}>
+        {inlineParse(bulleted)}
+        {tail}
+      </span>
+    );
+  });
+}
 
 export default function Chat() {
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -71,7 +113,7 @@ export default function Chat() {
         {messages.map((m, i) => (
           <div key={i} className={`msg ${m.role}`}>
             <div className="bubble">
-              {m.content}
+              {m.role === "assistant" ? renderRich(m.content) : m.content}
               {m.role === "assistant" && m.sources && m.sources.length > 0 && (
                 <details className="sources">
                   <summary>검색된 근거 자료 {m.sources.length}건</summary>
