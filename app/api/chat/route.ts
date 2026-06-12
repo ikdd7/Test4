@@ -291,8 +291,39 @@ async function retrieveForRead(query: string): Promise<{ served: Hit[]; context:
   return { served, context: formatContext(served) };
 }
 
+// 질의 재구성(HyDE-lite): 시민 말투 → 정식 법령용어 키워드로 변환해 검색어를 보강.
+// 예) "교체 때문에 점검 못 함" → "자체점검 면제 또는 연기, 점검 연기 신청".
+// 사례형 질문에서 정답 조문이 단어 불일치로 누락되는 것을 줄인다. 실패 시 원문만 사용.
+async function expandQuery(q: string): Promise<string> {
+  const sys =
+    "당신은 대한민국 소방 법령 검색 보조기입니다. 사용자의 민원 질문을 읽고, 답의 근거가 될 법령을 찾기 위한 '정식 법령용어·제도명·예상 조문 키워드'만 쉼표로 5~12개 출력하세요. 시민이 쓴 일상어를 법령용어로 바꾸세요(예: '점검 못 함'→'자체점검 면제 또는 연기', '비상구 막음'→'피난시설 폐쇄'). 설명·문장 금지, 키워드만 한 줄로.";
+  const msg: Msg[] = [{ role: "user", content: q }];
+  let out = "";
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      out = await generateGemini(msg, sys);
+    } catch {
+      /* 무시 — Groq로 */
+    }
+  }
+  if (!out && groqKey()) {
+    try {
+      out = await generateGroq(msg, sys);
+    } catch {
+      /* 무시 — 원문만 사용 */
+    }
+  }
+  return (out || "").replace(/^[^:]*:/, "").replace(/\s+/g, " ").trim().slice(0, 300);
+}
+
 async function answerGemini(incoming: Msg[], lastUser: string) {
-  const { served, context } = await retrieveForRead(lastUser);
+  // 명시 참조(제N조/별표 N)가 없는 "사례·개념형" 질문에만 질의 재구성 적용
+  let retrievalQuery = lastUser;
+  if (refsFrom(lastUser).length === 0) {
+    const expansion = await expandQuery(lastUser);
+    if (expansion) retrievalQuery = `${lastUser} ${expansion}`;
+  }
+  const { served, context } = await retrieveForRead(retrievalQuery);
   if (served.length === 0) {
     return { answer: "검색된 자료에 없습니다. (제공된 법령 데이터에서 관련 조문을 찾지 못했습니다.)", sources: [], mode: "llm" };
   }
