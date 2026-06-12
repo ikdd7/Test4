@@ -20,7 +20,12 @@ export default function Login() {
     if (res.ok) {
       window.location.href = "/";
     } else {
-      setErr("비밀번호가 올바르지 않습니다.");
+      const data = await res.json().catch(() => ({}));
+      if (data.reason === "no_password_set") {
+        setErr("서버에 APP_PASSWORD 환경변수가 설정되지 않았습니다. Vercel 환경변수에 추가한 뒤 Redeploy 하세요.");
+      } else {
+        setErr("비밀번호가 올바르지 않습니다.");
+      }
     }
   }
 
