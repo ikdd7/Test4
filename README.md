@@ -17,6 +17,26 @@
 
 ---
 
+## 🧪 API 없이 무료로 테스트하기 (검색 전용 모드)
+
+Claude API 키 없이도 바로 써볼 수 있습니다. **API 키를 넣지 않으면** 자동으로 **검색 전용 모드**로 동작합니다(또는 `LLM_MODE=search` 설정).
+- 질문하면 LLM 해석 없이 **매칭된 조문·별표 원문을 효력 위계대로 그대로** 보여줍니다. **환각 0(원문 그대로) · 비용 0.**
+- 동봉된 `data/index.json` 덕분에 **인제스트도 필요 없습니다.**
+
+**로컬에서 바로 (3단계):**
+```bash
+npm install
+echo "APP_PASSWORD=test" > .env.local      # Claude 키 불필요!
+npm run dev
+```
+→ `http://localhost:3000` 접속 → 비밀번호 `test` → 질문 (예: "별표 4 보여줘", "소방시설법 제13조", "과태료 부과기준").
+
+> 나중에 **진짜 해석·판정 답변**(LLM)을 원하면 `.env.local`에 `ANTHROPIC_API_KEY`만 추가하면 자동으로 LLM 모드로 전환됩니다.
+> 배포(Vercel)도 동일 — 환경변수에 `APP_PASSWORD`만 넣고 `ANTHROPIC_API_KEY`를 비워두면 무료 검색기로 운영됩니다.
+> (Anthropic 대신 무료 로컬 LLM으로 답변 생성을 붙이는 것도 가능 — 필요하면 요청하세요.)
+
+---
+
 ## 1. 폴더 구조
 
 ```

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { search, lookupExact, formatContext, indexSize } from "@/lib/search";
-import { SYSTEM_PROMPT, AGENT_INSTRUCTION, VERIFY_PROMPT } from "@/lib/prompt";
+import { SYSTEM_PROMPT, AGENT_INSTRUCTION, VERIFY_PROMPT, DISCLAIMER } from "@/lib/prompt";
 import type { Hit } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -88,14 +88,58 @@ function verifyQuotes(answer: string, served: Hit[]): string[] {
   return unverified;
 }
 
-export async function POST(req: Request) {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    return NextResponse.json(
-      { error: "서버에 ANTHROPIC_API_KEY가 설정되지 않았습니다." },
-      { status: 500 }
-    );
-  }
+// ── 검색 전용 모드(LLM 미사용): 원문만 효력위계대로 그대로 출력 ──
+function refsFrom(q: string): string[] {
+  const out: string[] = [];
+  for (const m of q.matchAll(/제\s*\d+\s*조(?:의\s*\d+)?/g)) out.push(m[0].replace(/\s+/g, ""));
+  for (const m of q.matchAll(/별표\s*\d+(?:의\s*\d+)?/g)) out.push(m[0].replace(/\s+/g, " ").trim());
+  return out;
+}
 
+async function buildSearchOnly(query: string) {
+  const exact: Hit[] = [];
+  for (const r of refsFrom(query)) exact.push(...lookupExact("", r));
+  const hits = await search(query, 8);
+  const seen = new Set<string>();
+  const merged: Hit[] = [];
+  for (const h of [...exact, ...hits]) {
+    if (!seen.has(h.id)) {
+      seen.add(h.id);
+      merged.push(h);
+    }
+  }
+  const top = merged.slice(0, 8);
+  const isLaw = (t: string) => ["법률", "시행령", "시행규칙", "별표", "고시"].includes(t);
+  const fmt = (h: Hit) => {
+    const meta = `[${h.type}] ${h.title}${h.article ? " " + h.article : ""} (시행일/회신일자 ${h.date})`;
+    const text = h.text.length > 2500 ? h.text.slice(0, 2500) + "\n…(원문 일부 생략 — 원문 직접 확인)" : h.text;
+    return `${meta}\n${text}`;
+  };
+  const law = top.filter((h) => isLaw(h.type));
+  const interp = top.filter((h) => !isLaw(h.type));
+
+  let body = "🔎 검색 전용 모드 (LLM 미사용) — 질문을 해석하지 않고, 검색된 ‘원문’만 그대로 보여줍니다.\n\n";
+  if (top.length === 0) {
+    body += "검색된 자료에 없습니다.\n\n";
+  } else {
+    body += "① [법령 근거] (구속력 있는 규정)\n\n";
+    body += law.length ? law.map(fmt).join("\n\n──────────\n\n") : "(검색된 법령 근거 없음)";
+    body += "\n\n";
+    if (interp.length) {
+      body += "② [해석·참고] (법 자체가 아닌 공식 해석 — 이후 개정으로 달라졌을 수 있음)\n\n";
+      body += interp.map(fmt).join("\n\n──────────\n\n");
+      body += "\n\n";
+    }
+  }
+  body += `※ ${DISCLAIMER}`;
+  return {
+    answer: body,
+    mode: "search",
+    sources: top.map((h) => ({ type: h.type, title: h.title, article: h.article, date: h.date })),
+  };
+}
+
+export async function POST(req: Request) {
   const body = await req.json().catch(() => ({}));
   const incoming: Msg[] = Array.isArray(body.messages) ? body.messages : [];
   const lastUser = [...incoming].reverse().find((m) => m.role === "user")?.content?.toString().trim() || "";
@@ -107,6 +151,12 @@ export async function POST(req: Request) {
         "검색 인덱스가 비어 있습니다. ./data 폴더에 법령 파일을 넣고 `npm run ingest`를 실행한 뒤 다시 배포해 주세요.",
       sources: [],
     });
+  }
+
+  // API 키가 없거나 LLM_MODE=search 이면 → 검색 전용(무료, 비-LLM) 모드
+  const SEARCH_ONLY = !process.env.ANTHROPIC_API_KEY || process.env.LLM_MODE === "search";
+  if (SEARCH_ONLY) {
+    return NextResponse.json(await buildSearchOnly(lastUser));
   }
 
   const anthropic = new Anthropic();
