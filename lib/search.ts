@@ -82,6 +82,7 @@ export function lookupExact(lawName: string | undefined, article: string): Hit[]
   const lnTokens = tokenize(lawName || "");
   const res = chunks
     .filter((c) => {
+      if (c.role === "child") return false; // 정확조회는 전체(부모)만 — 검색용 서브청크 제외
       const am = c.article ? c.article.replace(/\s+/g, "").includes(a) : false;
       const tm = lnTokens.length ? lnTokens.every((t) => c.title.toLowerCase().includes(t)) : true;
       return am && tm;

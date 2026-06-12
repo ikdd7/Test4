@@ -20,6 +20,14 @@ const ROOT = process.cwd();
 const DATA = path.join(ROOT, "data");
 const NO_EMBED = process.env.INGEST_NO_EMBED === "1";
 
+// ── 계층청킹(별표) 설정 ──────────────────────────────────────────────────
+//  큰 별표는 전체(parent)를 1청크로 유지하면서, 검색 정밀도를 위해
+//  호(1.)→목(가.)→길이 순으로 "서브청크(child)"를 추가로 생성한다.
+//  (작은 별표는 그대로 1청크 — 불필요한 분할 방지)
+const APPENDIX_BIG = parseInt(process.env.APPENDIX_BIG || "2500", 10); // 이 글자수 이상이면 계층 분할
+const SUB_MAX = parseInt(process.env.APPENDIX_SUB_MAX || "1600", 10); // 서브청크 1개 목표 상한
+const SUB_MIN = parseInt(process.env.APPENDIX_SUB_MIN || "200", 10); // 이보다 작은 조각은 직전과 병합
+
 const TYPE_MAP = {
   law: "법률",
   enforcement_decree: "시행령",
@@ -133,6 +141,92 @@ function splitAppendix(body) {
   return out;
 }
 
+// ── 계층청킹: 큰 별표를 검색용 서브청크로 분할 ──────────────────────────
+// 마커(호/목)로 1차 분할. 마커가 2개 미만이면 분할 의미가 없어 null 반환.
+// 마커 앞 도입부(적용범위·캡션 등)는 "도입" 조각으로 따로 살린다.
+function splitMarkers(text, re, fmt) {
+  re.lastIndex = 0;
+  const marks = [];
+  let m;
+  while ((m = re.exec(text))) marks.push({ pos: m.index + (m[1] ? m[1].length : 0), label: fmt(m) });
+  if (marks.length < 2) return null;
+  const out = [];
+  const pre = text.slice(0, marks[0].pos).trim();
+  if (pre && pre.length >= SUB_MIN) out.push({ path: "도입", text: pre });
+  for (let i = 0; i < marks.length; i++) {
+    const s = marks[i].pos;
+    const e = i + 1 < marks.length ? marks[i + 1].pos : text.length;
+    const t = text.slice(s, e).trim();
+    if (t) out.push({ path: marks[i].label, text: t });
+  }
+  return out;
+}
+
+// 마커가 없을 만큼 큰 조각은 줄 경계 기준 길이로 강제 분할.
+function hardWrap(piece) {
+  const out = [];
+  let buf = "";
+  for (const ln of piece.text.split("\n")) {
+    if (buf && buf.length + ln.length > SUB_MAX) {
+      out.push(buf.trim());
+      buf = "";
+    }
+    buf += ln + "\n";
+  }
+  if (buf.trim()) out.push(buf.trim());
+  return out.map((t, i) => ({ path: piece.path + (out.length > 1 ? ` (${i + 1})` : ""), text: t }));
+}
+
+// 너무 작은 조각은 직전 조각에 병합(파편화 방지).
+function mergeSmall(arr) {
+  const out = [];
+  for (const p of arr) {
+    if (out.length && p.text.length < SUB_MIN) {
+      const prev = out[out.length - 1];
+      out[out.length - 1] = { path: prev.path, text: prev.text + "\n" + p.text };
+    } else out.push(p);
+  }
+  return out;
+}
+
+// 제목에서 별표 라벨("별표 4") 추출 — 별표 txt는 번호가 본문 줄 중간에 있어
+// splitAppendix가 못 잡으므로(article=null), 제목/캡션으로 보완한다.
+function appendixLabelFromTitle(title) {
+  const m = (title || "").match(/별표\s*(\d+(?:\s*의\s*\d+)?)/);
+  return m ? "별표 " + m[1].replace(/\s+/g, "") : null;
+}
+
+// 제목에서 한 줄 캡션(설명명) 추출 — 서브청크 헤더에 붙여 맥락 보존.
+function appendixCaption(title) {
+  let cap = (title || "").replace(/^\[?\s*별표\s*\d+(?:\s*의\s*\d+)?\s*\]?/, "").trim();
+  cap = cap.replace(/\(제[^)]*관련\).*$/, "").trim(); // "(제11조 관련)(법령명)" 꼬리 제거
+  return cap.length > 60 ? cap.slice(0, 60) : cap;
+}
+
+// 별표 전체 텍스트 → 서브청크 [{path, text}]. (호 → 목 → 길이 순으로 내려감)
+function subdivideAppendix(text) {
+  const ho = splitMarkers(text, /(^|\n)[ \t]*(\d{1,2})\.[ \t]/g, (m) => m[2] + "호");
+  const level1 = ho || [{ path: "", text }];
+  const out = [];
+  for (const p of level1) {
+    if (p.text.length <= SUB_MAX) {
+      out.push(p);
+      continue;
+    }
+    const mok = splitMarkers(p.text, /(^|\n)[ \t]*([가-하])\.[ \t]/g, (m) => m[2] + "목");
+    if (!mok) {
+      out.push(...hardWrap(p));
+      continue;
+    }
+    for (const q of mok) {
+      const merged = { path: [p.path, q.path].filter(Boolean).join(" "), text: q.text };
+      if (merged.text.length <= SUB_MAX) out.push(merged);
+      else out.push(...hardWrap(merged));
+    }
+  }
+  return mergeSmall(out);
+}
+
 function splitInterpretation(body) {
   return body
     .split(/\n\s*={3,}\s*\n|\n\s*-{3,}\s*\n/)
@@ -194,32 +288,67 @@ async function processFile(file, folderType, embed, chunks, dimRef) {
   const pieces = chunkByType(ftype, body);
   let seq = 0;
   let count = 0;
-  for (const piece of pieces) {
-    const text = piece.text.trim();
-    if (!text || text.length < 5) continue;
-    const article = piece.article || (ftype === "질의회신" ? refNo || `회신-${++seq}` : null);
-    const ctype = article && article.startsWith("별표") ? "별표" : ftype;
 
+  // 청크 1건 embed + push → 생성된 id 반환
+  const pushChunk = async (o) => {
     let embedding = null;
     try {
-      embedding = await embed(text);
+      embedding = await embed(o.text);
       if (embedding && !dimRef.dim) dimRef.dim = embedding.length;
     } catch (e) {
       console.warn("임베딩 실패(키워드로 대체):", rel, e?.message);
     }
-
+    const id = `${base}:${o.article || "x"}:${chunks.length}`;
     chunks.push({
-      id: `${base}:${article || "x"}:${chunks.length}`,
-      type: ctype,
+      id,
+      type: o.type,
       title,
-      article,
+      article: o.article,
       date,
       parent,
       source_file: rel,
-      text,
+      text: o.text,
       embedding,
+      role: o.role ?? null,
+      parent_id: o.parent_id ?? null,
     });
     count++;
+    return id;
+  };
+
+  for (const piece of pieces) {
+    const text = piece.text.trim();
+    if (!text || text.length < 5) continue;
+    let article = piece.article || (ftype === "질의회신" ? refNo || `회신-${++seq}` : null);
+    const ctype = (article && article.startsWith("별표")) || ftype === "별표" ? "별표" : ftype;
+    // 별표인데 마커로 번호를 못 잡은 경우(article=null) 제목에서 보완 → 정확조회 가능해짐
+    if (ctype === "별표" && !article) article = appendixLabelFromTitle(title);
+
+    // 부모 청크(별표는 전체를 1청크로 유지 — 표 경계·단서 보존 + 정확조회용)
+    const parentId = await pushChunk({
+      type: ctype,
+      article,
+      text,
+      role: ctype === "별표" ? "parent" : null,
+    });
+
+    // 큰 별표만 검색 정밀도용 서브청크(child) 추가
+    if (ctype === "별표" && text.length >= APPENDIX_BIG) {
+      const caption = appendixCaption(title);
+      const subs = subdivideAppendix(text);
+      if (subs.length > 1) {
+        for (const sub of subs) {
+          const header = `[${article || "별표"}] ${caption}${sub.path ? " > " + sub.path : ""}`.trim();
+          await pushChunk({
+            type: ctype,
+            article: `${article}${sub.path ? " " + sub.path : ""}`.trim(),
+            text: header + "\n" + sub.text,
+            role: "child",
+            parent_id: parentId,
+          });
+        }
+      }
+    }
   }
   console.log(`  ✓ ${rel}  [${ftype}] ${title} → ${count} 청크 (시행일 ${date})`);
 }

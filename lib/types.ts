@@ -9,6 +9,8 @@ export interface Chunk {
   source_file: string; // 원본 파일 경로
   text: string; // 원문 (수정 없이 그대로)
   embedding: number[] | null; // 정규화된 임베딩 벡터 (실패 시 null)
+  role?: "parent" | "child" | null; // 계층청킹: 별표 전체(parent) / 검색용 서브청크(child)
+  parent_id?: string | null; // child일 때 부모(별표 전체) 청크 id
 }
 
 export interface IndexFile {
