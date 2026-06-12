@@ -52,6 +52,7 @@ export default function Chat() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const chatRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   // 음성 인식(브라우저 내장 Web Speech API — 키·비용 없음)
   const [micSupported, setMicSupported] = useState(false);
@@ -136,11 +137,14 @@ export default function Chat() {
     setBusy(true);
     scrollDown();
 
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: next.map(({ role, content }) => ({ role, content })) }),
+        signal: ctrl.signal,
       });
       const data = await res.json();
       setMessages([
@@ -151,12 +155,21 @@ export default function Chat() {
           sources: data.sources,
         },
       ]);
-    } catch {
-      setMessages([...next, { role: "assistant", content: "네트워크 오류가 발생했습니다." }]);
+    } catch (err: any) {
+      if (err?.name === "AbortError") {
+        setMessages([...next, { role: "assistant", content: "⏹️ 요청을 중지했습니다." }]);
+      } else {
+        setMessages([...next, { role: "assistant", content: "네트워크 오류가 발생했습니다." }]);
+      }
     } finally {
+      abortRef.current = null;
       setBusy(false);
       scrollDown();
     }
+  }
+
+  function stop() {
+    abortRef.current?.abort();
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -236,7 +249,13 @@ export default function Chat() {
             </button>
           )}
         </div>
-        <button disabled={busy || !input.trim()}>전송</button>
+        {busy ? (
+          <button type="button" className="stop" onClick={stop} aria-label="응답 중지" title="응답 중지">
+            ■ 중지
+          </button>
+        ) : (
+          <button disabled={!input.trim()}>전송</button>
+        )}
       </form>
     </>
   );

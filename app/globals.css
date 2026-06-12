@@ -169,6 +169,20 @@ form.inputbar button:disabled {
   opacity: 0.5;
   cursor: default;
 }
+/* 응답 대기 중 '중지' 버튼 — 전송(빨강)과 구분되는 진회색 + 깜빡임 */
+form.inputbar button.stop {
+  background: #374151;
+  animation: stoppulse 1.2s ease-in-out infinite;
+}
+@keyframes stoppulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(55, 65, 81, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 0 5px rgba(55, 65, 81, 0);
+  }
+}
 .disclaimer {
   background: #2b2f36;
   color: #cfd3da;
