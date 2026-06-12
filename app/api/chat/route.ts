@@ -139,6 +139,87 @@ async function buildSearchOnly(query: string) {
   };
 }
 
+// ── Gemini(무료 등급 가능) 모드: 검색 → 컨텍스트 주입 → 생성 → 검증 ──
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+
+async function generateGemini(messages: Msg[], system: string): Promise<string> {
+  const { GoogleGenerativeAI } = await import("@google/generative-ai");
+  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY as string);
+  const model = genAI.getGenerativeModel({ model: GEMINI_MODEL, systemInstruction: system });
+  const contents = messages.map((m) => ({
+    role: m.role === "assistant" ? "model" : "user",
+    parts: [{ text: String(m.content) }],
+  }));
+  const res = await model.generateContent({ contents });
+  return res.response.text();
+}
+
+async function retrieveForRead(query: string): Promise<{ served: Hit[]; context: string }> {
+  const exact: Hit[] = [];
+  for (const r of refsFrom(query)) exact.push(...lookupExact("", r));
+  const hits = await search(query, 14);
+  const seen = new Set<string>();
+  const served: Hit[] = [];
+  for (const h of [...exact, ...hits]) {
+    if (!seen.has(h.id)) {
+      seen.add(h.id);
+      served.push(h);
+    }
+  }
+  const top = served.slice(0, 16);
+  return { served: top, context: formatContext(top) };
+}
+
+async function answerGemini(incoming: Msg[], lastUser: string) {
+  const { served, context } = await retrieveForRead(lastUser);
+  if (served.length === 0) {
+    return { answer: "검색된 자료에 없습니다. (제공된 법령 데이터에서 관련 조문을 찾지 못했습니다.)", sources: [], mode: "gemini" };
+  }
+  const system = `${SYSTEM_PROMPT}
+
+────────── [검색자료] (아래 자료만 근거로 사용. 여기에 없는 내용은 "검색된 자료에 없습니다"라고 답하세요) ──────────
+
+${context}`;
+
+  let draft: string;
+  try {
+    draft = await generateGemini(incoming, system);
+  } catch (e: any) {
+    return {
+      answer: `Gemini 호출 오류: ${e?.message || e}\n(모델명을 확인하세요. 현재 GEMINI_MODEL=${GEMINI_MODEL} — 키가 지원하는 모델명으로 환경변수를 바꾸세요. 예: gemini-2.0-flash, gemini-1.5-flash)`,
+      sources: [],
+      mode: "gemini",
+    };
+  }
+
+  let finalAnswer = draft;
+  try {
+    const sourcesText = served
+      .map((s, i) => `[원본자료 ${i + 1}] ${s.type} | ${s.title} | ${s.article || ""} | ${s.date}\n${s.text}`)
+      .join("\n──────────\n");
+    const verified = await generateGemini(
+      [{ role: "user", content: `[원본 자료]\n${sourcesText}\n\n────────────────\n[검증 대상 답변]\n${draft}` }],
+      VERIFY_PROMPT
+    );
+    if (verified) finalAnswer = verified;
+  } catch {
+    /* 검증 실패 시 초안 유지 */
+  }
+
+  const warnings: string[] = [];
+  const bad = verifyQuotes(finalAnswer, served);
+  if (bad.length) warnings.push(`⛔ 인용 검증 실패(원본과 불일치 — 신뢰 불가): ${bad.map((q) => "«" + q + "»").join(" / ")}`);
+  const gaps = citationGaps(finalAnswer, served);
+  if (gaps.length) warnings.push(`⚠️ 참조 검증: ${gaps.join(", ")} 에 해당하는 검색자료를 찾지 못했습니다. 원문을 직접 확인하세요.`);
+  if (warnings.length) finalAnswer += `\n\n──────────\n${warnings.join("\n")}`;
+
+  return {
+    answer: finalAnswer,
+    sources: served.map((h) => ({ type: h.type, title: h.title, article: h.article, date: h.date })),
+    mode: "gemini",
+  };
+}
+
 export async function POST(req: Request) {
   const body = await req.json().catch(() => ({}));
   const incoming: Msg[] = Array.isArray(body.messages) ? body.messages : [];
@@ -153,11 +234,21 @@ export async function POST(req: Request) {
     });
   }
 
-  // API 키가 없거나 LLM_MODE=search 이면 → 검색 전용(무료, 비-LLM) 모드
-  const SEARCH_ONLY = !process.env.ANTHROPIC_API_KEY || process.env.LLM_MODE === "search";
-  if (SEARCH_ONLY) {
-    return NextResponse.json(await buildSearchOnly(lastUser));
-  }
+  // 공급자 자동 선택: LLM_PROVIDER 우선 → Gemini 키 → Anthropic 키 → 없으면 검색전용
+  const provider = (
+    process.env.LLM_PROVIDER ||
+    (process.env.LLM_MODE === "search"
+      ? "search"
+      : process.env.GEMINI_API_KEY
+      ? "gemini"
+      : process.env.ANTHROPIC_API_KEY
+      ? "anthropic"
+      : "search")
+  ).toLowerCase();
+
+  if (provider === "search") return NextResponse.json(await buildSearchOnly(lastUser));
+  if (provider === "gemini") return NextResponse.json(await answerGemini(incoming, lastUser));
+  // provider === "anthropic" → 아래 에이전틱 파이프라인 진행
 
   const anthropic = new Anthropic();
   const agentSystem = `${SYSTEM_PROMPT}\n\n${AGENT_INSTRUCTION}`;

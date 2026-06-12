@@ -31,9 +31,13 @@ npm run dev
 ```
 → `http://localhost:3000` 접속 → 비밀번호 `test` → 질문 (예: "별표 4 보여줘", "소방시설법 제13조", "과태료 부과기준").
 
-> 나중에 **진짜 해석·판정 답변**(LLM)을 원하면 `.env.local`에 `ANTHROPIC_API_KEY`만 추가하면 자동으로 LLM 모드로 전환됩니다.
-> 배포(Vercel)도 동일 — 환경변수에 `APP_PASSWORD`만 넣고 `ANTHROPIC_API_KEY`를 비워두면 무료 검색기로 운영됩니다.
-> (Anthropic 대신 무료 로컬 LLM으로 답변 생성을 붙이는 것도 가능 — 필요하면 요청하세요.)
+### LLM 답변까지 무료로 — Gemini(권장 테스트)
+LLM 해석·판정 답변을 **무료로** 보고 싶으면 **Google Gemini 무료 키**를 쓰면 됩니다.
+1. https://aistudio.google.com → **Get API key**(무료) 발급
+2. `.env.local`(또는 Vercel 환경변수)에 `GEMINI_API_KEY=발급키` 추가 → **자동으로 Gemini 모드**로 전환(검색→근거주입→생성→검증).
+3. 모델이 안 맞으면 `GEMINI_MODEL=gemini-2.0-flash`(또는 `gemini-1.5-flash`)로 바꾸세요.
+
+**공급자는 키만 넣으면 자동 선택**됩니다: `GEMINI_API_KEY` → Gemini · `ANTHROPIC_API_KEY` → Claude(에이전틱+검증, 유료·최상) · 둘 다 없음 → 검색 전용(원문만).
 
 ---
 
@@ -146,10 +150,13 @@ data/inbox/   ← 받은 .hwp 파일을 여기에 몽땅 드래그
 2. **Import Git Repository** 에서 이 저장소 선택 → **Import**.
 3. **Framework Preset** 가 `Next.js` 로 자동 인식되는지 확인(그대로 둠).
 4. **Environment Variables** 펼치고 아래를 추가(Name / Value):
-   - `ANTHROPIC_API_KEY` = (당신의 Claude 키)
-   - `APP_PASSWORD` = (접속 비밀번호)
+   - `APP_PASSWORD` = (접속 비밀번호) — **필수**
    - `AUTH_SALT` = (아무 랜덤 문자열)
-   - (선택) `ANTHROPIC_MODEL` = `claude-fable-5`
+   - **LLM 공급자(하나 선택, 또는 생략):**
+     - 무료 테스트 → `GEMINI_API_KEY` = (AI Studio 무료 키), 필요시 `GEMINI_MODEL` = `gemini-2.5-flash`
+     - 최상 정확도 → `ANTHROPIC_API_KEY` = (Claude 키), `ANTHROPIC_MODEL` = `claude-fable-5`
+     - 생략 → 키 없이 **검색 전용 모드**(원문만)로 배포됨
+   - ⚠️ Import 시 **브랜치를 `claude/vibe-coding-business-Y6GCN`** 로 선택하세요(코드가 이 브랜치에 있습니다).
 5. **Deploy** 클릭 → 빌드 완료까지 대기.
 6. 발급된 주소(`https://…vercel.app`) 접속 → 비밀번호 입력 → 사용.
 7. 이후 데이터 갱신: 로컬에서 `npm run ingest` → `git commit` → `git push` 하면 자동 재배포됩니다.

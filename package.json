@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "latest",
+    "@google/generative-ai": "latest",
     "@huggingface/transformers": "^3.0.0",
     "next": "^15.1.0",
     "react": "^19.0.0",
