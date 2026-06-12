@@ -97,12 +97,18 @@ form.inputbar {
   border-top: 1px solid #e2e5ea;
   background: #fff;
 }
+.ta-wrap {
+  position: relative;
+  flex: 1;
+  display: flex;
+}
 form.inputbar textarea {
   flex: 1;
+  width: 100%;
   resize: none;
   border: 1px solid #cdd2da;
   border-radius: 10px;
-  padding: 10px 12px;
+  padding: 10px 46px 10px 12px;
   font-size: 14.5px;
   font-family: inherit;
   height: 48px;
@@ -116,17 +122,31 @@ form.inputbar button {
   font-size: 14.5px;
   cursor: pointer;
 }
+/* 입력창 안쪽 오른쪽, 반투명 마이크 */
 form.inputbar button.mic {
-  background: #fff;
-  border: 1px solid #cdd2da;
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
   color: #333;
-  padding: 0 12px;
   font-size: 18px;
+  line-height: 1;
+  opacity: 0.5;
+}
+form.inputbar button.mic:hover {
+  opacity: 0.8;
 }
 form.inputbar button.mic.on {
   background: #b71c1c;
-  border-color: #b71c1c;
   color: #fff;
+  opacity: 1;
+  font-size: 13px;
   animation: micpulse 1s ease-in-out infinite;
 }
 @keyframes micpulse {

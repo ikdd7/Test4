@@ -180,27 +180,29 @@ export default function Chat() {
       </div>
 
       <form className="inputbar" onSubmit={send}>
-        {micSupported && (
-          <button
-            type="button"
-            className={`mic ${listening ? "on" : ""}`}
-            onClick={toggleMic}
-            title={listening ? "듣는 중… (눌러서 중지)" : "음성으로 질문하기"}
-            aria-label="음성 입력"
-          >
-            {listening ? "■" : "🎤"}
-          </button>
-        )}
-        <textarea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={onKeyDown}
-          placeholder={
-            listening
-              ? "말씀하세요… (음성 인식 중)"
-              : "예) 소방시설법 제13조 알려줘 / 11층 업무시설에 스프링클러 설치 대상인가요?"
-          }
-        />
+        <div className="ta-wrap">
+          <textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={onKeyDown}
+            placeholder={
+              listening
+                ? "말씀하세요… (음성 인식 중)"
+                : "예) 소방시설법 제13조 알려줘 / 11층 업무시설에 스프링클러 설치 대상인가요?"
+            }
+          />
+          {micSupported && (
+            <button
+              type="button"
+              className={`mic ${listening ? "on" : ""}`}
+              onClick={toggleMic}
+              title={listening ? "듣는 중… (눌러서 중지)" : "음성으로 질문하기"}
+              aria-label="음성 입력"
+            >
+              {listening ? "■" : "🎤"}
+            </button>
+          )}
+        </div>
         <button disabled={busy || !input.trim()}>전송</button>
       </form>
     </>
