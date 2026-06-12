@@ -115,6 +115,8 @@ export async function search(query: string, topK = 12): Promise<Hit[]> {
       if (inArticle) score += 0.6;
       else if (inText) score += 0.25;
     }
+    // 질의회신·법령해석은 "보조 근거"라 약간 하향(법령이 우선 노출되도록)
+    if (c.type === "질의회신" || c.type === "법령해석") score *= 0.8;
     return { ...c, score };
   });
 
