@@ -135,19 +135,46 @@ async function buildSearchOnly(query: string) {
   };
 }
 
-// ── Gemini(무료 등급 가능) 모드: 검색 → 컨텍스트 주입 → 생성 → 검증 ──
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+// 과부하(503)·레이트리밋(429) 대비: 재시도 + 모델 자동 폴백
+const GEMINI_MODELS = Array.from(
+  new Set([
+    process.env.GEMINI_MODEL || "gemini-2.0-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-2.5-flash",
+    "gemini-1.5-flash",
+  ])
+);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function generateGemini(messages: Msg[], system: string): Promise<string> {
   const { GoogleGenerativeAI } = await import("@google/generative-ai");
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY as string);
-  const model = genAI.getGenerativeModel({ model: GEMINI_MODEL, systemInstruction: system });
   const contents = messages.map((m) => ({
     role: m.role === "assistant" ? "model" : "user",
     parts: [{ text: String(m.content) }],
   }));
-  const res = await model.generateContent({ contents });
-  return res.response.text();
+
+  let lastErr: any = null;
+  for (const modelName of GEMINI_MODELS) {
+    const model = genAI.getGenerativeModel({ model: modelName, systemInstruction: system });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await model.generateContent({ contents });
+        return res.response.text();
+      } catch (e: any) {
+        lastErr = e;
+        const msg = String(e?.message || e);
+        const transient = /50[239]|429|high demand|overload|unavailable|rate limit/i.test(msg);
+        if (transient && attempt === 0) {
+          await sleep(1500); // 같은 모델 1회 재시도
+          continue;
+        }
+        break; // 다음 모델로 폴백
+      }
+    }
+  }
+  throw lastErr;
 }
 
 async function retrieveForRead(query: string): Promise<{ served: Hit[]; context: string }> {
@@ -181,11 +208,12 @@ ${context}`;
   try {
     draft = await generateGemini(incoming, system);
   } catch (e: any) {
-    return {
-      answer: `Gemini 호출 오류: ${e?.message || e}\n(모델명을 확인하세요. 현재 GEMINI_MODEL=${GEMINI_MODEL} — 키가 지원하는 모델명으로 환경변수를 바꾸세요. 예: gemini-2.0-flash, gemini-1.5-flash)`,
-      sources: [],
-      mode: "gemini",
-    };
+    // 모든 모델 과부하/실패 → 검색 결과(원문)라도 표시(우아한 강등)
+    const fb = await buildSearchOnly(lastUser);
+    fb.answer =
+      "⚠️ LLM(제미나이) 일시 오류로 정리된 답변을 만들지 못했습니다(과부하일 수 있음 — 잠시 후 다시 시도). 아래는 검색된 근거 원문입니다.\n\n" +
+      fb.answer;
+    return fb;
   }
 
   let finalAnswer = draft;
