@@ -458,7 +458,9 @@ ${compactContext}`;
   // OpenRouter를 Groq보다 먼저 두는 이유: 무료라도 한국어 법령 추론이 더 낫기 때문.
   const fallbacks: { name: string; label: string; gen: (m: Msg[], s: string) => Promise<string> }[] = [];
   if (orKey()) fallbacks.push({ name: "openrouter", label: "OpenRouter(DeepSeek/Qwen)", gen: generateOpenRouter });
-  if (groqKey()) fallbacks.push({ name: "groq", label: "Groq(llama)", gen: generateGroq });
+  // DISABLE_GROQ=1 이면 Groq를 폴백에서 제외(품질 문제 시 끄기용)
+  if (groqKey() && process.env.DISABLE_GROQ !== "1")
+    fallbacks.push({ name: "groq", label: "Groq(llama)", gen: generateGroq });
 
   let draft = "";
   let usedFallback: { name: string; label: string; gen: (m: Msg[], s: string) => Promise<string> } | null = null;
@@ -517,9 +519,11 @@ ${compactContext}`;
   if (gaps.length) warnings.push(`⚠️ 참조 검증: ${gaps.join(", ")} 에 해당하는 검색자료를 찾지 못했습니다. 원문을 직접 확인하세요.`);
   if (warnings.length) finalAnswer += `\n\n──────────\n${warnings.join("\n")}`;
 
-  // 생성 모델 표기(품질 추적용): 폴백 답변은 정확도가 낮을 수 있음을 명시
-  if (usedFallback)
-    finalAnswer += `\n\n─ 생성: ${usedFallback.label}(보조 모델, Gemini 일시 불가로 대체 — 중요 사안은 재질문 권장)`;
+  // 생성 모델 표기(품질 추적용): 폴백 답변은 정확도가 낮을 수 있음을 명시 + 앞서 실패한 공급자 진단
+  if (usedFallback) {
+    const tried = errs.length ? `\n  (앞서 실패: ${errs.join(" / ")})` : "";
+    finalAnswer += `\n\n─ 생성: ${usedFallback.label}(보조 모델, Gemini 일시 불가로 대체 — 중요 사안은 재질문 권장)${tried}`;
+  }
 
   return {
     answer: finalAnswer,
