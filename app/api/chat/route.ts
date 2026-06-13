@@ -175,32 +175,30 @@ async function generateGemini(messages: Msg[], system: string): Promise<string> 
   throw lastErr;
 }
 
-// ── Groq(무료) 폴백 — Gemini 과부하/실패 시 사용. OpenAI 호환 엔드포인트 ──
-//  주의: 유료인 Grok(xAI)이 아니라, 무료 추론 서비스 Groq(groq.com)입니다.
-const groqKey = () => process.env.GROQ_API_KEY || "";
-const GROQ_MODELS = Array.from(
-  new Set([process.env.GROQ_MODEL || "llama-3.3-70b-versatile", "llama-3.1-8b-instant"])
-);
-
-async function generateGroq(messages: Msg[], system: string): Promise<string> {
-  const key = groqKey();
-  if (!key) throw new Error("no GROQ_API_KEY");
+// ── 무료 폴백 LLM (OpenAI 호환 엔드포인트 공용 호출기) ──
+// Gemini 과부하/실패 시 사용. 같은 인터페이스로 Groq·OpenRouter 등을 붙인다.
+async function generateOAICompat(
+  cfg: { url: string; key: string; models: string[]; headers?: Record<string, string>; label: string },
+  messages: Msg[],
+  system: string
+): Promise<string> {
+  if (!cfg.key) throw new Error(`no key for ${cfg.label}`);
   const chat = [
     { role: "system", content: system },
     ...messages.map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: String(m.content) })),
   ];
   let lastErr: any = null;
-  for (const model of GROQ_MODELS) {
+  for (const model of cfg.models) {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        const res = await fetch(cfg.url, {
           method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.key}`, ...(cfg.headers || {}) },
           body: JSON.stringify({ model, messages: chat, temperature: 0 }),
         });
         if (!res.ok) {
           const t = await res.text();
-          lastErr = new Error(`groq ${res.status} ${t.slice(0, 200)}`);
+          lastErr = new Error(`${cfg.label} ${res.status} ${t.slice(0, 200)}`);
           const transient = /50[239]|429|overload|rate limit|unavailable/i.test(`${res.status} ${t}`);
           if (transient && attempt === 0) {
             await sleep(1500);
@@ -211,7 +209,7 @@ async function generateGroq(messages: Msg[], system: string): Promise<string> {
         const j: any = await res.json();
         const text = j?.choices?.[0]?.message?.content || "";
         if (text) return text;
-        lastErr = new Error("groq empty response");
+        lastErr = new Error(`${cfg.label} empty response`);
         break;
       } catch (e: any) {
         lastErr = e;
@@ -225,6 +223,40 @@ async function generateGroq(messages: Msg[], system: string): Promise<string> {
   }
   throw lastErr;
 }
+
+// Groq(무료) — llama 계열. 빠르지만 한국어 법령 추론은 약한 편.
+const groqKey = () => process.env.GROQ_API_KEY || "";
+const GROQ_MODELS = Array.from(
+  new Set([process.env.GROQ_MODEL || "llama-3.3-70b-versatile", "llama-3.1-8b-instant"])
+);
+const generateGroq = (messages: Msg[], system: string) =>
+  generateOAICompat(
+    { url: "https://api.groq.com/openai/v1/chat/completions", key: groqKey(), models: GROQ_MODELS, label: "groq" },
+    messages,
+    system
+  );
+
+// OpenRouter(무료) — DeepSeek V3 / Qwen 등 강한 모델을 무료로. 한국어 추론이 llama보다 나음.
+const orKey = () => process.env.OPENROUTER_API_KEY || "";
+const OR_MODELS = Array.from(
+  new Set([
+    process.env.OPENROUTER_MODEL || "deepseek/deepseek-chat-v3-0324:free",
+    "qwen/qwen-2.5-72b-instruct:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+  ])
+);
+const generateOpenRouter = (messages: Msg[], system: string) =>
+  generateOAICompat(
+    {
+      url: "https://openrouter.ai/api/v1/chat/completions",
+      key: orKey(),
+      models: OR_MODELS,
+      headers: { "X-Title": "sobang-law-ai" },
+      label: "openrouter",
+    },
+    messages,
+    system
+  );
 
 // 동적 근거 선택: 질문 난이도에 따라 건수가 변동(점수 임계 + 하한/상한 + 계층 커버리지).
 //  환경변수로 조정: RAG_MIN(기본 8) · RAG_MAX(기본 24) · RAG_RATIO(기본 0.5)
@@ -410,35 +442,41 @@ async function answerGemini(incoming: Msg[], lastUser: string) {
 
 ${context}`;
 
-  // Groq 무료 모델은 토큰 한도가 작아 컨텍스트를 압축해서 보냄(413 Request too large 방지)
+  // 무료 폴백 모델은 토큰 한도가 작아 컨텍스트를 압축해서 보냄(413 Request too large 방지)
   // 중요: 에이전트 보강 자료가 목록 끝에 붙으므로, 단순 slice하면 정작 핵심 근거가 잘림 → 보강분 우선 포함
-  const GROQ_MAX_CHUNKS = Math.max(1, parseInt(process.env.GROQ_MAX_CHUNKS || "8", 10) || 8);
-  const GROQ_MAX_PER_CHUNK = Math.max(200, parseInt(process.env.GROQ_MAX_PER_CHUNK || "700", 10) || 700);
-  const compactPick = [...agentAdded, ...served.slice(0, initialCount)].slice(0, GROQ_MAX_CHUNKS);
-  const compactContext = formatContext(compactPick, GROQ_MAX_PER_CHUNK);
+  const FB_MAX_CHUNKS = Math.max(1, parseInt(process.env.GROQ_MAX_CHUNKS || "8", 10) || 8);
+  const FB_MAX_PER_CHUNK = Math.max(200, parseInt(process.env.GROQ_MAX_PER_CHUNK || "700", 10) || 700);
+  const compactPick = [...agentAdded, ...served.slice(0, initialCount)].slice(0, FB_MAX_CHUNKS);
+  const compactContext = formatContext(compactPick, FB_MAX_PER_CHUNK);
   const compactSystem = `${SYSTEM_PROMPT}
 
 ────────── [검색자료] (아래 자료만 근거로 사용. 없는 내용은 "검색된 자료에 없습니다") ──────────
 
 ${compactContext}`;
 
-  // 1) Gemini(전체 컨텍스트) → 실패 시 2) Groq(압축 컨텍스트) → 둘 다 실패 시 검색전용
+  // 폴백 사다리: Gemini(전체) → OpenRouter(DeepSeek/Qwen, 압축) → Groq(llama, 압축) → 검색전용
+  // OpenRouter를 Groq보다 먼저 두는 이유: 무료라도 한국어 법령 추론이 더 낫기 때문.
+  const fallbacks: { name: string; label: string; gen: (m: Msg[], s: string) => Promise<string> }[] = [];
+  if (orKey()) fallbacks.push({ name: "openrouter", label: "OpenRouter(DeepSeek/Qwen)", gen: generateOpenRouter });
+  if (groqKey()) fallbacks.push({ name: "groq", label: "Groq(llama)", gen: generateGroq });
+
   let draft = "";
-  let usedGroq = false;
+  let usedFallback: { name: string; label: string; gen: (m: Msg[], s: string) => Promise<string> } | null = null;
   const errs: string[] = [];
   if (process.env.GEMINI_API_KEY) {
     try {
       draft = await generateGemini(incoming, system);
     } catch (e: any) {
-      errs.push("gemini: " + String(e?.message || e).slice(0, 160));
+      errs.push("gemini: " + String(e?.message || e).slice(0, 140));
     }
   }
-  if (!draft && groqKey()) {
+  for (const fb of fallbacks) {
+    if (draft) break;
     try {
-      draft = await generateGroq(incoming, compactSystem);
-      usedGroq = true;
+      draft = await fb.gen(incoming, compactSystem);
+      usedFallback = fb;
     } catch (e: any) {
-      errs.push("groq: " + String(e?.message || e).slice(0, 160));
+      errs.push(`${fb.name}: ` + String(e?.message || e).slice(0, 140));
     }
   }
   if (!draft) {
@@ -452,11 +490,11 @@ ${compactContext}`;
   }
 
   // 검증 패스: 초안을 원본과 대조해 인용·수치 불일치 정정.
-  //  Gemini 경로 = 전체 원본 / Groq 경로 = 압축 원본(413 방지) — 환각(수치 창작) 방어라 생략하지 않음
+  //  Gemini 경로 = 전체 원본 / 폴백 경로 = 압축 원본(413 방지) — 환각(수치 창작) 방어라 생략하지 않음
   let finalAnswer = draft;
   try {
-    const verifySources = usedGroq ? compactPick : served;
-    const cap = usedGroq ? GROQ_MAX_PER_CHUNK : 0;
+    const verifySources = usedFallback ? compactPick : served;
+    const cap = usedFallback ? FB_MAX_PER_CHUNK : 0;
     const sourcesText = verifySources
       .map((s, i) => {
         const body = cap > 0 && s.text.length > cap ? s.text.slice(0, cap) + " …(이하 생략)" : s.text;
@@ -466,7 +504,7 @@ ${compactContext}`;
     const verifyMsg: Msg[] = [
       { role: "user", content: `[원본 자료]\n${sourcesText}\n\n────────────────\n[검증 대상 답변]\n${draft}` },
     ];
-    const verified = usedGroq ? await generateGroq(verifyMsg, VERIFY_PROMPT) : await generateGemini(verifyMsg, VERIFY_PROMPT);
+    const verified = usedFallback ? await usedFallback.gen(verifyMsg, VERIFY_PROMPT) : await generateGemini(verifyMsg, VERIFY_PROMPT);
     if (verified) finalAnswer = verified;
   } catch {
     /* 검증 실패 시 초안 유지 */
@@ -479,15 +517,14 @@ ${compactContext}`;
   if (gaps.length) warnings.push(`⚠️ 참조 검증: ${gaps.join(", ")} 에 해당하는 검색자료를 찾지 못했습니다. 원문을 직접 확인하세요.`);
   if (warnings.length) finalAnswer += `\n\n──────────\n${warnings.join("\n")}`;
 
-  // 생성 모델 표기(품질 문제 추적용): Groq 폴백 답변은 정확도가 낮을 수 있음을 명시
-  finalAnswer += usedGroq
-    ? `\n\n─ 생성: Groq(보조 모델, Gemini 일시 불가로 대체 — 중요 사안은 재질문 권장)`
-    : ``;
+  // 생성 모델 표기(품질 추적용): 폴백 답변은 정확도가 낮을 수 있음을 명시
+  if (usedFallback)
+    finalAnswer += `\n\n─ 생성: ${usedFallback.label}(보조 모델, Gemini 일시 불가로 대체 — 중요 사안은 재질문 권장)`;
 
   return {
     answer: finalAnswer,
     sources: served.map((h) => ({ type: h.type, title: h.title, article: h.article, date: h.date })),
-    mode: usedGroq ? "llm-groq" : "llm-gemini",
+    mode: usedFallback ? `llm-${usedFallback.name}` : "llm-gemini",
   };
 }
 
@@ -505,13 +542,13 @@ export async function POST(req: Request) {
     });
   }
 
-  // 공급자 자동 선택: LLM_PROVIDER 우선 → Gemini/Groq 키 → Anthropic 키 → 없으면 검색전용
-  const hasGeminiOrGroq = !!(process.env.GEMINI_API_KEY || process.env.GROQ_API_KEY);
+  // 공급자 자동 선택: LLM_PROVIDER 우선 → Gemini/OpenRouter/Groq 키 → Anthropic 키 → 없으면 검색전용
+  const hasFreeLLM = !!(process.env.GEMINI_API_KEY || process.env.OPENROUTER_API_KEY || process.env.GROQ_API_KEY);
   const provider = (
     process.env.LLM_PROVIDER ||
     (process.env.LLM_MODE === "search"
       ? "search"
-      : hasGeminiOrGroq
+      : hasFreeLLM
       ? "llm"
       : process.env.ANTHROPIC_API_KEY
       ? "anthropic"
