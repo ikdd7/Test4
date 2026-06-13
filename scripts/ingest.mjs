@@ -235,9 +235,40 @@ function splitInterpretation(body) {
     .map((p) => ({ article: null, text: p }));
 }
 
+// 고시(화재안전기술기준 NFTC) 청킹: "1.1 적용범위", "2.4 감지기" 같은 십진 소절 단위.
+// (제○조가 아니라 N.N 머리표로 나눔. N.N.N 클라우즈는 소절 안에 포함)
+function splitNotice(body) {
+  const re = /(^|\n)[ \t]*(\d+\.\d+)\s+(?=\S)/g; // "1.1"·"2.4" 소절만(표 안 "2." 단독, "2.4.1" 클라우즈는 매칭 안 됨)
+  const marks = [];
+  let m;
+  while ((m = re.exec(body))) marks.push({ pos: m.index + (m[1] ? m[1].length : 0), label: m[2] });
+  if (marks.length === 0) return [{ article: null, text: body.trim() }];
+  const raw = [];
+  const pre = body.slice(0, marks[0].pos).trim();
+  if (pre) raw.push({ article: null, text: pre });
+  for (let i = 0; i < marks.length; i++) {
+    const s = marks[i].pos;
+    const e = i + 1 < marks.length ? marks[i + 1].pos : body.length;
+    const t = body.slice(s, e).trim();
+    if (t) raw.push({ article: marks[i].label, text: t });
+  }
+  // 머리글만 있는 짧은 상위 섹션(예: "1. 일반사항", "2. 기술기준")은 다음 청크 앞에 합침
+  const out = [];
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (c.text.length < 24 && i + 1 < raw.length) {
+      raw[i + 1] = { article: raw[i + 1].article, text: c.text + "\n" + raw[i + 1].text };
+    } else {
+      out.push(c);
+    }
+  }
+  return out;
+}
+
 function chunkByType(type, body) {
   if (type === "별표") return splitAppendix(body);
   if (type === "질의회신") return splitInterpretation(body);
+  if (type === "고시") return splitNotice(body);
   return splitLaw(body);
 }
 
