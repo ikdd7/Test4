@@ -277,8 +277,10 @@ body {
   font: inherit;
   font-size: 15px;
   line-height: 22px;
+  /* box-sizing:border-box 이므로 높이에 상하 패딩(14px)을 포함해야 글자가 세로 중앙에 옴 */
+  height: 36px;
+  min-height: 36px;
   max-height: 200px;
-  height: 22px;
   padding: 7px 0;
   background: transparent;
   display: block;
