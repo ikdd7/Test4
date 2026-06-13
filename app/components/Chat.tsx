@@ -6,6 +6,14 @@ import type { ReactNode } from "react";
 type Source = { type: string; title: string; article: string | null; date: string };
 type Msg = { role: "user" | "assistant"; content: string; sources?: Source[] };
 
+// 첫 화면 추천 민원(소방)
+const SUGGESTIONS: { icon: string; title: string; prompt: string }[] = [
+  { icon: "🧯", title: "음식점 소화기 비치 기준", prompt: "음식점을 새로 차리려고 합니다. 소화기는 몇 개를 어디에 비치해야 하나요?" },
+  { icon: "🚪", title: "비상구 막으면 과태료", prompt: "비상구를 물건으로 막아두면 과태료가 얼마인가요?" },
+  { icon: "🧑‍🚒", title: "소방안전관리자 선임 대상", prompt: "우리 건물도 소방안전관리자를 꼭 선임해야 하나요? 어떤 건물이 대상인가요?" },
+  { icon: "🔍", title: "자체점검 횟수", prompt: "소방시설 자체점검은 1년에 몇 번 해야 하나요?" },
+];
+
 // 인라인 마크다운: **굵게**, `코드`
 function inlineParse(text: string): ReactNode[] {
   const parts: ReactNode[] = [];
@@ -66,6 +74,13 @@ export default function Chat() {
     setMicSupported(!!SR);
   }, []);
 
+  function autoGrow() {
+    const el = taRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 200) + "px";
+  }
+
   function micErrorText(code: string): string {
     switch (code) {
       case "not-allowed":
@@ -98,12 +113,13 @@ export default function Chat() {
     const base = input.trim() ? input.trim() + " " : "";
     rec.onstart = () => {
       setListening(true);
-      taRef.current?.focus(); // 입력창에 커서가 깜빡이도록
+      taRef.current?.focus();
     };
     rec.onresult = (e: any) => {
       let txt = "";
       for (let i = e.resultIndex; i < e.results.length; i++) txt += e.results[i][0].transcript;
       setInput(base + txt);
+      requestAnimationFrame(autoGrow);
       taRef.current?.focus();
     };
     rec.onerror = (e: any) => {
@@ -116,7 +132,7 @@ export default function Chat() {
     try {
       rec.start();
     } catch {
-      // 이미 시작된 경우 등 — 무시
+      /* 이미 시작된 경우 등 — 무시 */
     }
   }
 
@@ -126,14 +142,15 @@ export default function Chat() {
     });
   }
 
-  async function send(e?: React.FormEvent) {
+  async function send(e?: React.FormEvent, preset?: string) {
     e?.preventDefault();
-    const q = input.trim();
+    const q = (preset ?? input).trim();
     if (!q || busy) return;
 
     const next: Msg[] = [...messages, { role: "user", content: q }];
     setMessages(next);
     setInput("");
+    if (taRef.current) taRef.current.style.height = "auto";
     setBusy(true);
     scrollDown();
 
@@ -179,68 +196,85 @@ export default function Chat() {
     }
   }
 
+  const empty = messages.length === 0;
+
   return (
     <>
-      <div className="chat" ref={chatRef}>
-        <div className="intro">
-          안녕하세요. <b>대한민국 소방 법령 안내 도구</b>입니다. 소방시설법·화재예방법과 그 시행령·
-          시행규칙·별표·고시·질의회신을 근거로 <b>조문을 찾아 보여드립니다</b>.
-          <br />※ 본 도구는 법령 정보 안내이며 <b>법률 자문이 아닙니다</b>. 최종 판단은 원문 확인 및
-          관할 소방서·전문가 확인을 거치세요.
+      {empty ? (
+        <div className="welcome">
+          <div className="welcome-logo">🚒</div>
+          <h2>무엇을 도와드릴까요?</h2>
+          <p>소방시설법·화재예방법과 시행령·시행규칙·별표·고시·질의회신에서 근거 조문을 찾아드립니다.</p>
+          <div className="cards">
+            {SUGGESTIONS.map((s, i) => (
+              <button key={i} className="card" onClick={() => send(undefined, s.prompt)} type="button">
+                <div className="card-t">
+                  {s.icon} {s.title}
+                </div>
+                <div className="card-d">{s.prompt}</div>
+              </button>
+            ))}
+          </div>
         </div>
-
-        {messages.map((m, i) => (
-          <div key={i} className={`msg ${m.role}`}>
-            <div className="bubble">
-              {m.role === "assistant" ? renderRich(m.content) : m.content}
-              {m.role === "assistant" && m.sources && m.sources.length > 0 && (
-                <details className="sources">
-                  <summary>검색된 근거 자료 {m.sources.length}건</summary>
-                  <ul>
-                    {m.sources.map((s, j) => (
-                      <li key={j}>
-                        [{s.type}] {s.title}
-                        {s.article ? ` ${s.article}` : ""} · {s.date}
-                      </li>
-                    ))}
-                  </ul>
-                </details>
-              )}
+      ) : (
+        <div className="thread" ref={chatRef}>
+          {messages.map((m, i) => (
+            <div key={i} className={`row ${m.role}`}>
+              {m.role === "assistant" && <div className="avatar">🚒</div>}
+              <div className="content">
+                {m.role === "assistant" ? renderRich(m.content) : m.content}
+                {m.role === "assistant" && m.sources && m.sources.length > 0 && (
+                  <details className="sources">
+                    <summary>검색된 근거 자료 {m.sources.length}건</summary>
+                    <ul>
+                      {m.sources.map((s, j) => (
+                        <li key={j}>
+                          [{s.type}] {s.title}
+                          {s.article ? ` ${s.article}` : ""} · {s.date}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </div>
             </div>
-          </div>
-        ))}
+          ))}
 
-        {busy && (
-          <div className="msg assistant">
-            <div className="bubble">
-              여러 단계로 검색하고 근거를 교차검증하는 중…
-              <br />
-              <span style={{ fontSize: 12, color: "#888" }}>
-                (정확도를 위해 다단계로 처리합니다 · 최대 1~2분 걸릴 수 있어요)
-              </span>
+          {busy && (
+            <div className="row assistant">
+              <div className="avatar">🚒</div>
+              <div className="content">
+                <div className="typing" aria-label="답변 작성 중">
+                  <span />
+                  <span />
+                  <span />
+                </div>
+              </div>
             </div>
-          </div>
-        )}
-      </div>
+          )}
+        </div>
+      )}
 
-      {micMsg && <div className="mic-msg">{micMsg}</div>}
-      <form className="inputbar" onSubmit={send}>
-        <div className="ta-wrap">
+      <form className="composer" onSubmit={send}>
+        {micMsg && <div className="mic-msg">{micMsg}</div>}
+        <div className="composer-inner">
           <textarea
             ref={taRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            rows={1}
+            onChange={(e) => {
+              setInput(e.target.value);
+              autoGrow();
+            }}
             onKeyDown={onKeyDown}
             placeholder={
-              listening
-                ? "말씀하세요… (음성 인식 중)"
-                : "예) 소방시설법 제13조 알려줘 / 11층 업무시설에 스프링클러 설치 대상인가요?"
+              listening ? "말씀하세요… (음성 인식 중)" : "소방 민원을 입력하세요 (예: 11층 업무시설 스프링클러 대상인가요?)"
             }
           />
           {micSupported && (
             <button
               type="button"
-              className={`mic ${listening ? "on" : ""}`}
+              className={`icon-btn mic ${listening ? "on" : ""}`}
               onClick={toggleMic}
               title={listening ? "듣는 중… (눌러서 중지)" : "음성으로 질문하기"}
               aria-label="음성 입력"
@@ -248,14 +282,19 @@ export default function Chat() {
               {listening ? "■" : "🎤"}
             </button>
           )}
+          {busy ? (
+            <button type="button" className="icon-btn stop" onClick={stop} aria-label="응답 중지" title="응답 중지">
+              ■
+            </button>
+          ) : (
+            <button type="submit" className="icon-btn send" disabled={!input.trim()} aria-label="전송" title="전송">
+              ↑
+            </button>
+          )}
         </div>
-        {busy ? (
-          <button type="button" className="stop" onClick={stop} aria-label="응답 중지" title="응답 중지">
-            ■ 중지
-          </button>
-        ) : (
-          <button disabled={!input.trim()}>전송</button>
-        )}
+        <div className="composer-hint">
+          ※ 법령 정보 안내이며 <b>법률 자문이 아닙니다</b>. 최종 판단은 원문 확인 및 관할 소방서·전문가 확인을 거치세요.
+        </div>
       </form>
     </>
   );

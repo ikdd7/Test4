@@ -1,17 +1,15 @@
 import Chat from "./components/Chat";
-import { DISCLAIMER } from "@/lib/prompt";
 
 export const dynamic = "force-dynamic";
 
 export default function Home() {
   return (
-    <div className="wrap">
-      <header className="bar">
-        <h1>🔥 소방 법령 안내 도구</h1>
-        <p>근거 조문을 찾아 보여주는 도구 · 법률 자문이 아닙니다</p>
+    <div className="app">
+      <header className="topbar">
+        <span className="brand">🚒 소방 법령 안내</span>
+        <span className="brand-sub">근거 조문 검색 · 법률 자문 아님</span>
       </header>
       <Chat />
-      <div className="disclaimer">※ {DISCLAIMER}</div>
     </div>
   );
 }
