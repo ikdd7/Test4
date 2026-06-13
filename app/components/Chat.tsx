@@ -220,7 +220,7 @@ export default function Chat() {
         <div className="welcome">
           <div className="welcome-logo">🚒</div>
           <h2>무엇을 도와드릴까요?</h2>
-          <p>소방시설법·화재예방법과 시행령·시행규칙·별표·고시·질의회신에서 근거 조문을 찾아드립니다.</p>
+          <p>소방시설법·화재예방법을 근거로 AI가 답변해 드립니다.</p>
           <div className="cards">
             {SUGGESTIONS.map((s, i) => (
               <button key={i} className="card" onClick={() => send(undefined, s.prompt)} type="button">
