@@ -131,12 +131,22 @@ body {
   margin: 2px 0;
 }
 
-/* 타이핑 인디케이터 */
+/* 검색 중 인디케이터 */
+.typing-wrap {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding-top: 4px;
+}
+.typing-text {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.4;
+}
 .typing {
   display: inline-flex;
   gap: 4px;
   align-items: center;
-  padding-top: 6px;
 }
 .typing span {
   width: 7px;

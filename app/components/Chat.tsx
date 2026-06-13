@@ -244,10 +244,15 @@ export default function Chat() {
             <div className="row assistant">
               <div className="avatar">🚒</div>
               <div className="content">
-                <div className="typing" aria-label="답변 작성 중">
-                  <span />
-                  <span />
-                  <span />
+                <div className="typing-wrap" aria-label="검색 중">
+                  <div className="typing">
+                    <span />
+                    <span />
+                    <span />
+                  </div>
+                  <span className="typing-text">
+                    소방 법령을 검색·검증하는 중입니다 … 정확한 답변을 위해 시간이 조금 걸릴 수 있어요.
+                  </span>
                 </div>
               </div>
             </div>
@@ -268,7 +273,7 @@ export default function Chat() {
             }}
             onKeyDown={onKeyDown}
             placeholder={
-              listening ? "말씀하세요… (음성 인식 중)" : "소방 민원을 입력하세요 (예: 11층 업무시설 스프링클러 대상인가요?)"
+              listening ? "말씀하세요… (음성 인식 중)" : "소방법령 문의사항을 적어주세요."
             }
           />
           {micSupported && (
