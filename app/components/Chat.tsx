@@ -251,7 +251,7 @@ export default function Chat() {
                     <span />
                   </div>
                   <span className="typing-text">
-                    소방 법령을 검색·검증하는 중입니다 … 정확한 답변을 위해 시간이 조금 걸릴 수 있어요.
+                    소방 법령을 검색·검증하는 중입니다. 시간이 조금 걸릴 수 있어요.
                   </span>
                 </div>
               </div>
@@ -298,7 +298,7 @@ export default function Chat() {
           )}
         </div>
         <div className="composer-hint">
-          ※ 법령 정보 안내이며 <b>법률 자문이 아닙니다</b>. 최종 판단은 원문 확인 및 관할 소방서·전문가 확인을 거치세요.
+          ※ 법령 정보 안내이며 <b>법률 자문이 아닙니다</b> — 최종 판단은 원문·관할 소방서 확인이 필요합니다.
         </div>
       </form>
     </>
