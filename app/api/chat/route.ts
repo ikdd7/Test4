@@ -134,11 +134,12 @@ async function buildSearchOnly(query: string) {
 }
 
 // 과부하(503)·레이트리밋(429) 대비: 재시도 + 모델 자동 폴백
-// (구글이 폐기한 gemini-1.5는 제외 — 현행 2.x 계열만 사용)
+// 기본 gemini-2.5-flash(추론 강화). 과부하 시 더 가벼운 모델로 자동 폴백.
 const GEMINI_MODELS = Array.from(
   new Set([
-    process.env.GEMINI_MODEL || "gemini-2.0-flash",
+    process.env.GEMINI_MODEL || "gemini-2.5-flash",
     "gemini-2.5-flash",
+    "gemini-2.0-flash",
     "gemini-2.5-flash-lite",
     "gemini-2.0-flash-lite",
   ])
