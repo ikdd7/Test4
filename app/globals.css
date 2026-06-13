@@ -45,10 +45,15 @@ body {
 .topbar .brand {
   font-weight: 700;
   font-size: 15px;
+  font-family: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
 }
-.topbar .brand-sub {
-  font-size: 11.5px;
-  color: var(--muted);
+.topbar .brand:hover {
+  opacity: 0.7;
 }
 
 /* ── 대화 스레드 ── */

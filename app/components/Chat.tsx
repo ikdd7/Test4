@@ -189,6 +189,16 @@ export default function Chat() {
     abortRef.current?.abort();
   }
 
+  // 헤더의 "소방 법령 안내" 클릭 → 첫 화면(웰컴)으로 초기화
+  function newChat() {
+    abortRef.current?.abort();
+    setBusy(false);
+    setMessages([]);
+    setInput("");
+    setMicMsg("");
+    if (taRef.current) taRef.current.style.height = "auto";
+  }
+
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -200,6 +210,12 @@ export default function Chat() {
 
   return (
     <>
+      <header className="topbar">
+        <button className="brand" onClick={newChat} type="button" title="첫 화면으로">
+          🚒 소방 법령 안내
+        </button>
+      </header>
+
       {empty ? (
         <div className="welcome">
           <div className="welcome-logo">🚒</div>
