@@ -212,7 +212,7 @@ export default function Chat() {
     <>
       <header className="topbar">
         <button className="brand" onClick={newChat} type="button" title="첫 화면으로">
-          🚒 소방 법령 안내
+          🚒 소방법령 AI
         </button>
       </header>
 
