@@ -31,7 +31,7 @@ export async function middleware(req: NextRequest) {
   return NextResponse.redirect(url);
 }
 
-// login / api/login / 정적자원은 게이트 제외
+// login / api/login / MCP(원격 커넥터) / 정적자원은 게이트 제외
 export const config = {
-  matcher: ["/((?!login|api/login|_next/static|_next/image|favicon.ico).*)"],
+  matcher: ["/((?!login|api/login|api/mcp|api/sse|_next/static|_next/image|favicon.ico).*)"],
 };
