@@ -31,7 +31,10 @@ export async function middleware(req: NextRequest) {
   return NextResponse.redirect(url);
 }
 
-// login / api/login / MCP(원격 커넥터) / 정적자원은 게이트 제외
+// login / api/login / MCP(원격 커넥터) / GPTs Action(api/search·openapi) / 정적자원은 게이트 제외
+//  ※ 외부 호스트(claude.ai·ChatGPT)가 쿠키 없이 호출하므로 게이트에서 빼고, 필요 시 토큰(MCP_TOKEN·API_TOKEN)으로 보호.
 export const config = {
-  matcher: ["/((?!login|api/login|api/mcp|api/sse|_next/static|_next/image|favicon.ico).*)"],
+  matcher: [
+    "/((?!login|api/login|api/mcp|api/sse|api/search|api/openapi.json|_next/static|_next/image|favicon.ico).*)",
+  ],
 };
