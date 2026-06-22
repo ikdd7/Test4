@@ -1,6 +1,24 @@
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
-import { search, lookupExact, formatContext } from "@/lib/search";
+import { search, lookupExact, formatContext, queryTerms } from "@/lib/search";
+import { rerank } from "@/lib/rerank";
+import { expandReferences, forceIncludeHubs } from "@/lib/refgraph";
+import type { Hit } from "@/lib/types";
+
+// 검색 + 리랭킹 + 참조엣지 확장 + 허브 강제포함 (웹 경로와 동일한 검색 품질을 MCP에도 적용).
+const isInterp = (t: string) => t === "질의회신" || t === "법령해석";
+async function searchRanked(query: string, k: number): Promise<Hit[]> {
+  const pool = await search(query, Math.max(k, 50)); // 1차: 재현율 위주로 넉넉히
+  const refAdded = expandReferences(pool.filter((h) => !isInterp(h.type)).slice(0, 8));
+  const hubs = forceIncludeHubs(query);
+  const byId = new Map<string, Hit>();
+  for (const h of [...pool, ...refAdded, ...hubs]) if (!byId.has(h.id)) byId.set(h.id, h);
+  const ranked = rerank([...byId.values()], queryTerms(query));
+  const hubIds = new Set(hubs.map((h) => h.id)); // 허브는 항상 앞쪽 보장
+  const head = ranked.filter((h) => hubIds.has(h.id));
+  const tail = ranked.filter((h) => !hubIds.has(h.id));
+  return [...head, ...tail].slice(0, Math.max(k, head.length));
+}
 
 // claude.ai 웹 "커스텀 커넥터"용 원격 MCP 서버(Streamable HTTP).
 // 검색만 담당하고, 답변 추론은 클로드가 직접 → 외부 LLM API 비용 0.
@@ -28,7 +46,7 @@ const mcp = createMcpHandler(
         topK: z.number().int().min(1).max(24).optional().describe("반환 개수(기본 12)"),
       },
       async ({ query, topK }) => {
-        const hits = await search(query, topK ?? 12);
+        const hits = await searchRanked(query, topK ?? 12);
         const text = hits.length ? formatContext(hits) : "검색된 자료에 없습니다.";
         return { content: [{ type: "text", text }] };
       }

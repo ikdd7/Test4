@@ -95,6 +95,16 @@ function expandedTokens(query: string): string[] {
   return [...base, ...stems, ...extra];
 }
 
+// 리랭커용: 질의의 "내용어 어간"(조사 제거, 2자+, 중복 제거). 동의어도 포함.
+export function queryTerms(query: string): string[] {
+  const base = tokenize(query).map(destem).filter((t) => t.length >= 2);
+  const extra: string[] = [];
+  for (const key of Object.keys(SYNONYMS)) {
+    if (query.includes(key)) for (const v of SYNONYMS[key]) extra.push(...tokenize(v).filter((t) => t.length >= 2));
+  }
+  return [...new Set([...base, ...extra])];
+}
+
 function exactRefs(q: string): string[] {
   const refs: string[] = [];
   for (const a of q.match(/제\s*\d+\s*조(?:의\s*\d+)?/g) || []) refs.push(a.replace(/\s+/g, ""));

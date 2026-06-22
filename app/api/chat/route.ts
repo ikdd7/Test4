@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
-import { search, lookupExact, formatContext, indexSize } from "@/lib/search";
+import { search, lookupExact, formatContext, indexSize, queryTerms } from "@/lib/search";
+import { rerank } from "@/lib/rerank";
+import { expandReferences, forceIncludeHubs } from "@/lib/refgraph";
+import { fetchLawArticle, lawApiEnabled } from "@/lib/lawapi";
 import {
   DELEGATION_PATTERNS,
   REFERENCE_PATTERNS,
@@ -272,42 +275,56 @@ const generateOpenRouter = (messages: Msg[], system: string) =>
 const isInterp = (t: string) => t === "질의회신" || t === "법령해석";
 
 async function retrieveForRead(query: string): Promise<{ served: Hit[]; context: string }> {
-  const MIN = Math.max(1, parseInt(process.env.RAG_MIN || "8", 10) || 8);
-  const MAX = Math.max(MIN, parseInt(process.env.RAG_MAX || "24", 10) || 24);
+  // 실무 표준: "많이 뽑고(재현율), 리랭킹 후 적게 넣기(정밀도)" → MAX 기본 12로 축소.
+  const MIN = Math.max(1, parseInt(process.env.RAG_MIN || "6", 10) || 6);
+  const MAX = Math.max(MIN, parseInt(process.env.RAG_MAX || "12", 10) || 12);
+  const POOL = Math.max(MAX, parseInt(process.env.RAG_POOL || "50", 10) || 50);
   const RATIO = Math.min(0.95, Math.max(0.05, parseFloat(process.env.RAG_RATIO || "0.5") || 0.5));
   const MAX_INTERP = Math.max(0, parseInt(process.env.RAG_MAX_INTERP || "3", 10));
-  // 질문이 사례·해석을 직접 묻는 경우엔 질의회신을 더 허용
   const wantsInterp = /질의|회신|사례|해석|판례|유권|선례|이런 경우|적용.*되나|봐도\s*되/.test(query);
 
+  const refs = refsFrom(query);
   const exact: Hit[] = [];
-  for (const r of refsFrom(query)) exact.push(...lookupExact("", r));
-  const pool = await search(query, 40);
+  for (const r of refs) exact.push(...lookupExact("", r));
+  const pool = await search(query, POOL); // 1차: 재현율 위주로 넉넉히
+
+  // 참조 엣지 확장: 상위 법령 조문이 가리키는 별표/조를 같은 법령 안에서 끌어옴(멀티홉 누락 방지)
+  const lawSeeds = pool.filter((h) => !isInterp(h.type)).slice(0, 8);
+  const refAdded = expandReferences(lawSeeds);
+  // 허브 강제포함: 만성적으로 밀리는 핵심 별표(면제·선임·점검) 안전망 — 질문 유형 일치 시
+  const hubs = forceIncludeHubs(query).map((h) => ({ ...h, score: h.score || 0 }));
 
   const byId = new Map<string, Hit>();
-  for (const h of [...exact, ...pool]) if (!byId.has(h.id)) byId.set(h.id, h);
-  const all = [...byId.values()].sort((a, b) => b.score - a.score);
+  for (const h of [...exact, ...pool, ...refAdded, ...hubs]) if (!byId.has(h.id)) byId.set(h.id, h);
+  let all = [...byId.values()];
   if (all.length === 0) return { served: [], context: "" };
 
+  // ── 리랭킹: 1차 점수 + 질의 핵심어 커버리지 + 효력위계 + 참조일치로 재정렬 ──
+  const terms = queryTerms(query);
+  all = rerank(all, terms, { refs });
+
   const exactIds = new Set(exact.map((h) => h.id));
+  const hubIds = new Set(hubs.map((h) => h.id));
   const lawAll = all.filter((h) => !isInterp(h.type));
   const interpAll = all.filter((h) => isInterp(h.type));
   const lawTop = lawAll[0]?.score ?? all[0].score;
 
   const picked = new Map<string, Hit>();
-  const add = (h: Hit) => {
-    if (!picked.has(h.id) && picked.size < MAX) picked.set(h.id, h);
+  const add = (h: Hit, force = false) => {
+    if (!picked.has(h.id) && (force || picked.size < MAX)) picked.set(h.id, h);
   };
 
-  // 1) 명시 참조(제N조/별표 N)는 항상 포함
-  for (const h of all) if (exactIds.has(h.id) && !isInterp(h.type)) add(h);
-  // 2) 법령(법률·령·규칙·별표·고시) 우선 — 점수 임계
+  // 0) 허브(강제포함)와 명시 참조는 순위·상한 무관하게 항상 포함
+  for (const h of all) if (hubIds.has(h.id)) add(h, true);
+  for (const h of all) if (exactIds.has(h.id) && !isInterp(h.type)) add(h, true);
+  // 1) 법령 우선 — 리랭크 점수 임계
   for (const h of lawAll) if (h.score >= lawTop * RATIO) add(h);
-  // 3) 법령 하한 보장
+  // 2) 법령 하한 보장
   for (const h of lawAll) {
     if (picked.size >= MIN) break;
     add(h);
   }
-  // 4) 법령 계층 커버리지(질의회신 제외)
+  // 3) 법령 계층 커버리지(질의회신 제외)
   const types = new Set([...picked.values()].map((h) => h.type));
   for (const h of lawAll) {
     if (picked.size >= MAX) break;
@@ -316,7 +333,7 @@ async function retrieveForRead(query: string): Promise<{ served: Hit[]; context:
       types.add(h.type);
     }
   }
-  // 5) 질의회신은 "꼭 필요할 때만": 법령 최고점과 견줄 만큼 강하게 관련될 때, 소수만
+  // 4) 질의회신은 "꼭 필요할 때만": 법령 최고점과 견줄 만큼 관련될 때 소수만
   const cap = wantsInterp ? Math.max(MAX_INTERP, 6) : MAX_INTERP;
   const interpThresh = (wantsInterp ? 0.45 : 0.78) * lawTop;
   let ic = 0;
@@ -368,7 +385,7 @@ async function expandQuery(q: string): Promise<string> {
 const RX_DELEGATION = compile(DELEGATION_PATTERNS);
 const RX_REFERENCE = compile(REFERENCE_PATTERNS);
 const RX_EXCEPTION = compile(EXCEPTION_PATTERNS);
-const ROUTER_CAP = 30; // 컨텍스트 폭주 방지 상한
+const ROUTER_CAP = Math.max(12, parseInt(process.env.ROUTER_CAP || "18", 10) || 18); // 최종 K(12) + 보강 여유
 const isLaw = (t: string) => LAW_TYPES.includes(t);
 const isSub = (t: string) => SUBORDINATE_TYPES.includes(t);
 
@@ -463,6 +480,22 @@ async function routeAndAugment(query: string, served: Hit[], hasExplicitRef: boo
   //  참조(별표 N/제N조)는 항상 정확조회(부작용 없음). 명시적 위임 문구면 하위규정도 조회.
   if (sig.refs.length) for (const r of sig.refs) add(lookupExact("", r));
   if (sig.delegation) add((await search(`${query} 시행규칙 고시 별표`, 5)).filter((h) => isSub(h.type)));
+
+  // 위임/참조 보강(권위 원문): 로컬 인덱스에 없는 인용 조문만 law.go.kr OpenAPI로 보충.
+  //  LAW_API_OC 미설정·네트워크 실패 시 fetchLawArticle이 null → 자동으로 건너뜀(기존 동작 불변).
+  if (lawApiEnabled()) {
+    const lawName = served.find((h) => isLaw(h.type))?.title || "";
+    for (const r of sig.refs) {
+      if (/^제\d+조/.test(r) && lookupExact("", r).length === 0) {
+        try {
+          const got = await fetchLawArticle(lawName, r);
+          if (got) add([got]);
+        } catch {
+          /* 폴백: 보충 없이 진행 */
+        }
+      }
+    }
+  }
   console.log(
     `[router] 판정1: refs=[${sig.refs.join(",")}] delegation=${sig.delegation} exception(로그용)=${sig.exception}`
   );
