@@ -1,6 +1,14 @@
 import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { search, lookupExact, formatContext, indexSize } from "@/lib/search";
+import {
+  DELEGATION_PATTERNS,
+  REFERENCE_PATTERNS,
+  EXCEPTION_PATTERNS,
+  SUBORDINATE_TYPES,
+  LAW_TYPES,
+  compile,
+} from "@/lib/router-config";
 import { SYSTEM_PROMPT, AGENT_INSTRUCTION, VERIFY_PROMPT, DISCLAIMER } from "@/lib/prompt";
 import type { Hit } from "@/lib/types";
 
@@ -352,73 +360,135 @@ async function expandQuery(q: string): Promise<string> {
 // ── 에이전틱 보강 라운드(무료 경로용, 함수호출 API 불필요한 텍스트 프로토콜) ──
 // 모델이 확보된 자료를 보고 "추가로 필요한 근거"를 LOOKUP/SEARCH 줄로 요청하면 실행해 합친다.
 // 예) 화재예방법 별표 4(등급 정의)가 「소방시설법 시행령」 별표 4(자탐 기준)를 참조하는 2단 추론 보강.
-const PLANNER_PROMPT = `당신은 대한민국 소방 법령 리서치 플래너입니다.
-[질문]에 정확히 답하려면 [확보된 자료]만으로 충분한지 판단하세요.
-특히 자료 본문이 「○○법 시행령」 별표 N, 법 제N조 같은 다른 조문·별표를 참조하는데 그 원문이 [확보된 자료]에 없다면, 그 원문을 반드시 요청하세요(기준 수치는 참조 원문에 있습니다).
-"설치 대상/등급/선임 대상" 판정 질문이면, 설치 기준뿐 아니라 "소방시설 설치의 면제 기준"(예: 「소방시설법 시행령」 별표 5 — 스프링클러 등으로 자동화재탐지설비가 면제·대체되는지)도 확보돼 있는지 확인하고, 없으면 함께 요청하세요.
-추가 자료가 필요하면 아래 형식의 줄만 출력하세요(설명 금지, 합계 4줄 이하):
-LOOKUP: 법령명|제N조
-LOOKUP: 법령명|별표 N
-SEARCH: 정식 법령용어 검색어
-더 필요한 자료가 없으면 READY 한 단어만 출력하세요.`;
+// ── 2단 판정 라우터 ───────────────────────────────────────────────────────
+// 판정1(규칙·LLM없음): 검색된 법령 텍스트의 신호어 스캔 → 위임/참조 자동 보강.
+// 판정2(LLM, 규칙으로 못 정한 경우만): 포섭 충분성 3라벨 분류.
+//  목표: 명확한 질문은 LLM 라우팅 호출 0회, 애매한 질문만 1회.
 
-async function agentAugment(lastUser: string, served: Hit[]): Promise<void> {
-  const ROUNDS = Math.max(0, parseInt(process.env.AGENT_ROUNDS || "2", 10));
-  const CAP = 30; // 컨텍스트 폭주 방지 상한
-  const ids = new Set(served.map((h) => h.id));
-  for (let round = 0; round < ROUNDS && served.length < CAP; round++) {
-    // 플래너에게는 압축 자료만(판단용) — 토큰 절약 + Groq 413 방지
-    const planCtx = formatContext(served.slice(0, 16), 350);
-    const planMsg: Msg[] = [{ role: "user", content: `[질문]\n${lastUser}\n\n[확보된 자료]\n${planCtx}` }];
-    let plan = "";
-    if (process.env.GEMINI_API_KEY) {
-      try {
-        plan = await generateGemini(planMsg, PLANNER_PROMPT);
-      } catch {
-        /* Groq로 */
-      }
-    }
-    if (!plan && groqKey()) {
-      try {
-        plan = await generateGroq(planMsg, PLANNER_PROMPT);
-      } catch {
-        return; // 플래너 불가 — 보강 없이 진행
-      }
-    }
-    if (!plan || /^\s*READY\b/m.test(plan)) return;
+const RX_DELEGATION = compile(DELEGATION_PATTERNS);
+const RX_REFERENCE = compile(REFERENCE_PATTERNS);
+const RX_EXCEPTION = compile(EXCEPTION_PATTERNS);
+const ROUTER_CAP = 30; // 컨텍스트 폭주 방지 상한
+const isLaw = (t: string) => LAW_TYPES.includes(t);
+const isSub = (t: string) => SUBORDINATE_TYPES.includes(t);
 
-    const lookups = [...plan.matchAll(/^\s*LOOKUP:\s*(.+)$/gim)].map((m) => m[1].trim()).slice(0, 3);
-    const searches = [...plan.matchAll(/^\s*SEARCH:\s*(.+)$/gim)].map((m) => m[1].trim()).slice(0, 3);
-    if (lookups.length === 0 && searches.length === 0) return;
-
-    let added = 0;
-    for (const l of lookups) {
-      const [name, art] = l.includes("|") ? l.split("|").map((s) => s.trim()) : ["", l.trim()];
-      for (const h of lookupExact(name, art)) {
-        if (!ids.has(h.id) && served.length < CAP) {
-          ids.add(h.id);
-          served.push(h);
-          added++;
-        }
-      }
+// 판정1: 규칙 기반 신호어 스캔(LLM 없음)
+function scanSignals(lawText: string): { delegation: boolean; exception: boolean; refs: string[] } {
+  const delegation = RX_DELEGATION.some((re) => ((re.lastIndex = 0), re.test(lawText)));
+  const exception = RX_EXCEPTION.some((re) => ((re.lastIndex = 0), re.test(lawText)));
+  const refs = new Set<string>();
+  for (const re of RX_REFERENCE) {
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(lawText))) {
+      const b = m[0].match(/별표\s*\d+(?:의\s*\d+)?/);
+      const a = m[0].match(/제\s*\d+\s*조(?:의\s*\d+)?/);
+      if (b) refs.add(b[0].replace(/\s+/g, " ").trim());
+      else if (a) refs.add(a[0].replace(/\s+/g, ""));
     }
-    for (const q of searches) {
-      for (const h of await search(q, 5)) {
-        if (!ids.has(h.id) && served.length < CAP) {
-          ids.add(h.id);
-          served.push(h);
-          added++;
-        }
-      }
-    }
-    if (added === 0) return; // 더 못 찾으면 종료(무한루프 방지)
   }
+  return { delegation, exception, refs: [...refs].slice(0, 6) };
+}
+
+// 판정2: 포섭 충분성 LLM 분류(3라벨). 실패 시 null.
+const SUFFICIENCY_PROMPT = `너는 한국 소방 법령의 '포섭(subsumption) 충분성'을 판정하는 분류기다. 아래 [질문]과 [검색된 법령 조각]만 근거로, 이 조각이 질문을 '직접·확정적으로' 규율하는지 판정하라. 답을 생성하지 말고, 추가 검색이 필요한지만 분류하라.
+
+[라벨 — 정확히 하나]
+① SUFFICIENT: 조각이 질문의 구체 사실관계를 빠짐없이 규율하고 수치·대상·요건이 그대로 대입 가능. 외부 규정을 더 봐야 한다는 단서 없음.
+② NEED_DELEGATION: 법령이 구체 기준을 하위 규범(대통령령/부령/고시/별표)에 위임하고, 정작 수치·세부기준이 이 조각엔 없음.
+③ NEED_INTERPRETATION: 법령이 일반 원칙·정의만 두고 질문의 구체 상황을 직접 포섭하지 못함. 위임 문구는 없으나 적용·경계·소급 등이 해석에 달려 모호함.
+
+[원칙]
+- "다른 규범에 있다"고 가리키면 DELEGATION, 가리키지 않는데 불분명하면 INTERPRETATION.
+- SUFFICIENT는 '의심의 여지 없이' 충분할 때만. 조금이라도 외부 규범·해석 여지가 있으면 주지 마라(소방은 누락=안전·법 리스크, 의심스러우면 확장).
+- 조각 밖 지식으로 판정 금지. 주어진 텍스트만.
+
+[출력 — 이 JSON만, 다른 텍스트 금지]
+{"label":"SUFFICIENT|NEED_DELEGATION|NEED_INTERPRETATION","reason":"한 문장","trigger_phrase":"근거가 된 조각 내 핵심 문구(없으면 \\"\\")"}`;
+
+async function classifySufficiency(
+  query: string,
+  served: Hit[]
+): Promise<{ label: string; reason: string; trigger_phrase: string } | null> {
+  const ctx = formatContext(
+    served.filter((h) => isLaw(h.type)).slice(0, 12),
+    400
+  );
+  const msg: Msg[] = [{ role: "user", content: `[질문]\n${query}\n\n[검색된 법령 조각]\n${ctx}` }];
+  let out = "";
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      out = await generateGemini(msg, SUFFICIENCY_PROMPT);
+    } catch {
+      /* Groq로 */
+    }
+  }
+  if (!out && groqKey()) {
+    try {
+      out = await generateGroq(msg, SUFFICIENCY_PROMPT);
+    } catch {
+      return null;
+    }
+  }
+  if (!out) return null;
+  const m = out.match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  try {
+    const j = JSON.parse(m[0]);
+    if (!["SUFFICIENT", "NEED_DELEGATION", "NEED_INTERPRETATION"].includes(j.label)) return null;
+    return j;
+  } catch {
+    return null;
+  }
+}
+
+// 라우터: 판정1(규칙) → (필요시) 판정2(LLM 3라벨) → 보강. served를 제자리 수정.
+//  반환: 최종 라벨(로그/가드레일용). hasExplicitRef=명시 조문번호 질문이면 판정2 생략.
+async function routeAndAugment(query: string, served: Hit[], hasExplicitRef: boolean): Promise<string> {
+  const ids = new Set(served.map((h) => h.id));
+  const add = (hits: Hit[]) => {
+    for (const h of hits)
+      if (!ids.has(h.id) && served.length < ROUTER_CAP) {
+        ids.add(h.id);
+        served.push(h);
+      }
+  };
+  const lawText = served
+    .filter((h) => isLaw(h.type))
+    .map((h) => h.text)
+    .join("\n");
+  const sig = scanSignals(lawText);
+
+  // ── 판정1 (규칙, LLM 없음) — 안전한 자동 보강만 ──
+  //  참조(별표 N/제N조)는 항상 정확조회(부작용 없음). 명시적 위임 문구면 하위규정도 조회.
+  if (sig.refs.length) for (const r of sig.refs) add(lookupExact("", r));
+  if (sig.delegation) add((await search(`${query} 시행규칙 고시 별표`, 5)).filter((h) => isSub(h.type)));
+  console.log(
+    `[router] 판정1: refs=[${sig.refs.join(",")}] delegation=${sig.delegation} exception(로그용)=${sig.exception}`
+  );
+
+  // ── 판정2 (LLM 3라벨) — 조문 콕 집은 질문은 정확조회로 충분하니 생략(비용 절감) ──
+  if (hasExplicitRef) {
+    console.log("[router] 판정2 생략(명시 조문 참조 질문)");
+    return "SUFFICIENT";
+  }
+  const c = await classifySufficiency(query, served);
+  const label = c?.label || "SUFFICIENT"; // 분류 실패 시 보강 없이 진행
+  console.log(`[router] 판정2 라벨=${label} 이유=${c?.reason || "(분류 실패)"}`);
+
+  if (label === "NEED_DELEGATION") {
+    add((await search(`${query} 시행령 시행규칙 별표 화재안전기술기준`, 6)).filter((h) => isSub(h.type)));
+  } else if (label === "NEED_INTERPRETATION") {
+    add((await search(query, 10)).filter((h) => h.type === "질의회신" || h.type === "법령해석").slice(0, 3));
+  }
+  return label;
 }
 
 async function answerGemini(incoming: Msg[], lastUser: string) {
   // 명시 참조(제N조/별표 N)가 없는 "사례·개념형" 질문에만 질의 재구성 적용
+  const hasExplicitRef = refsFrom(lastUser).length > 0;
   let retrievalQuery = lastUser;
-  if (refsFrom(lastUser).length === 0) {
+  if (!hasExplicitRef) {
     const expansion = await expandQuery(lastUser);
     if (expansion) retrievalQuery = `${lastUser} ${expansion}`;
   }
@@ -428,14 +498,21 @@ async function answerGemini(incoming: Msg[], lastUser: string) {
     return { answer: "검색된 자료에 없습니다. (제공된 법령 데이터에서 관련 조문을 찾지 못했습니다.)", sources: [], mode: "llm" };
   }
 
-  // 에이전틱 보강: 자료 간 참조 사슬(등급 정의→설치 기준 등)을 모델이 직접 따라가게 함
-  const initialCount = served.length;
+  // 2단 판정 라우터: 법령만으로 충분한지 판단해, 위임(하위규정)·해석(질의회신) 필요 시에만 확장
+  const initialIds = new Set(served.map((h) => h.id));
+  let routeLabel = "SUFFICIENT";
   try {
-    await agentAugment(lastUser, served);
+    routeLabel = await routeAndAugment(lastUser, served, hasExplicitRef);
   } catch {
-    /* 보강 실패해도 초기 자료로 진행 */
+    /* 라우팅 실패해도 초기 자료로 진행 */
   }
-  const agentAdded = served.slice(initialCount); // 모델이 "꼭 필요하다"고 요청해 가져온 자료
+  // 가드레일: 해석이 필요한 경우가 아니면 질의회신(효력 낮은 해석)을 컨텍스트에서 배제
+  if (routeLabel !== "NEED_INTERPRETATION") {
+    for (let i = served.length - 1; i >= 0; i--)
+      if (served[i].type === "질의회신" || served[i].type === "법령해석") served.splice(i, 1);
+  }
+  // 라우터가 보강한 자료(압축 컨텍스트에서 우선) — prune 후에도 ID 기준이라 안전
+  const agentAdded = served.filter((h) => !initialIds.has(h.id));
 
   const context = formatContext(served);
   const system = `${SYSTEM_PROMPT}
@@ -448,7 +525,8 @@ ${context}`;
   // 중요: 에이전트 보강 자료가 목록 끝에 붙으므로, 단순 slice하면 정작 핵심 근거가 잘림 → 보강분 우선 포함
   const FB_MAX_CHUNKS = Math.max(1, parseInt(process.env.GROQ_MAX_CHUNKS || "8", 10) || 8);
   const FB_MAX_PER_CHUNK = Math.max(200, parseInt(process.env.GROQ_MAX_PER_CHUNK || "700", 10) || 700);
-  const compactPick = [...agentAdded, ...served.slice(0, initialCount)].slice(0, FB_MAX_CHUNKS);
+  const initialKept = served.filter((h) => initialIds.has(h.id));
+  const compactPick = [...agentAdded, ...initialKept].slice(0, FB_MAX_CHUNKS);
   const compactContext = formatContext(compactPick, FB_MAX_PER_CHUNK);
   const compactSystem = `${SYSTEM_PROMPT}
 
