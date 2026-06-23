@@ -173,10 +173,14 @@ export async function search(query: string, topK = 12): Promise<Hit[]> {
   const idfTotal = qTokens.reduce((s, t) => s + (idf.get(t) || 0), 0);
 
   let qvec: number[] | null = null;
-  try {
-    qvec = await embedQuery(query);
-  } catch (e) {
-    console.error("[search] query embedding failed, keyword-only fallback:", e);
+  // SEARCH_KEYWORD_ONLY=1 이면 임베딩 모델 로딩을 건너뜀(콜드 스타트 수십초 → 즉시).
+  //  리랭커·허브·참조확장이 키워드 모드에서도 핵심 별표를 끌어올리므로 정확도 저하가 작다.
+  if (process.env.SEARCH_KEYWORD_ONLY !== "1") {
+    try {
+      qvec = await embedQuery(query);
+    } catch (e) {
+      console.error("[search] query embedding failed, keyword-only fallback:", e);
+    }
   }
 
   const hays = haystacks();
